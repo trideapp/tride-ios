@@ -1,0 +1,51 @@
+TRIDE PLAYERS LICENCE 1.1
+
+Copyright (c) 2026 Tride Labs Ltd. All rights reserved except as granted below.
+
+In short: you may put the Tride players in your websites and apps, free of charge, including
+commercial ones. You may not sell or hand out the players on their own.
+
+Definitions
+- "Licensor": Tride Labs Ltd, a company registered in England and Wales, company number 17546581,
+  registered office 124 City Road, London, EC1V 2NX, and anyone to whom it transfers the rights in the
+  Players (clause 10).
+- "Players": the release this licence accompanies — the Tride web player, the Tride iOS and Android
+  libraries, the runtime binaries inside them, their source files, documentation, sample code and
+  sample scenes. The Tride Editor is not part of the Players; the Tride Terms of Use cover it.
+- "You": any person or organisation that receives the Players under this licence, together with
+  their employees and contractors while working on Your Products.
+- "Your Product": a website, application or other product made by You that plays scenes with the
+  Players and does more than only distribute the Players.
+- "Your Content": scenes and other material You create, including with the Tride Editor, other than
+  the sample scenes.
+
+1. Grant. The Licensor grants You the right to use and copy the Players; to integrate them into Your
+   Products; to modify their source files and the sample scenes for that purpose; and to distribute
+   the Players, changed or not, as part of Your Products to their users, who may use them as part of
+   Your Products. You may do this for any purpose, including commercial ones, without paying the
+   Licensor.
+2. Duration. The grant in clause 1 is non-exclusive, worldwide, royalty-free and perpetual for every
+   release of the Players You have received under this licence, except as set out in clause 8. Later
+   releases may come under different terms; the terms of a release You already have never change.
+3. Limits. You may not: (a) sell, license, lend, publish or otherwise make the Players available on
+   their own, or as a library, development kit or service for others to build with, other than as
+   part of Your Products; (b) attempt to derive source code from the runtime binaries, except where
+   the law allows it regardless of this licence; (c) remove copyright or licence notices.
+4. Your Content. You own Your Content. This licence gives the Licensor no rights in it.
+5. Your changes. Changes, fixes and ideas You send to the Licensor may be used, modified and
+   relicensed by the Licensor under any terms, without payment to You. Changes You keep to Yourself
+   stay Yours.
+6. Name. You may state truthfully that Your Product uses Tride. This licence gives no other right to
+   use the name or logo "Tride", and no right to suggest that the Licensor endorses Your Product.
+7. Third-party components. The Players contain components under their own licences, listed in
+   THIRD_PARTY_NOTICES. Those licences govern those components; nothing here limits them.
+8. Termination for breach. If You breach clause 3 and do not cure the breach within 30 days of
+   written notice from the Licensor, this licence ends for You. Copies of the Players inside products
+   already delivered to their users may remain there.
+9. No warranty; liability. The Players are provided "as is", without warranty of any kind. To the
+   maximum extent permitted by law, the Licensor is not liable for any loss or damage arising from
+   the Players or their use. Nothing in this licence limits liability that cannot be limited by law.
+10. Transfer. The Licensor may transfer the rights in the Players, including this licence, to another
+    person or company; this licence then continues unchanged with the new rightsholder. You may
+    transfer it only together with Your Product or the business that makes it.
+11. Law. This licence is governed by the laws of England and Wales.

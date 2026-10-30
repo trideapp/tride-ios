@@ -1,0 +1,369 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0C1C6237CCCF8522DF36CA9E /* TrideCore in Frameworks */ = {isa = PBXBuildFile; productRef = FBD14FAC9DC023BD2ECF8108 /* TrideCore */; };
+		144D414AD815ED939B865063 /* TrideKit in Frameworks */ = {isa = PBXBuildFile; productRef = F20BFD707AEB2783C9DEE6BF /* TrideKit */; };
+		2168847C72D5A5D90A2D42C6 /* BindingsPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B9229E9DA1C020A2FF34BC0 /* BindingsPanel.swift */; };
+		46A0B059674757FFF2C89247 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 383B6BC5B4BA06F43865019D /* PlayerView.swift */; };
+		8675DDE939F9B6010F1E6838 /* TridePlayerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF80F4A57607307224828CB7 /* TridePlayerApp.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		1B9229E9DA1C020A2FF34BC0 /* BindingsPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BindingsPanel.swift; sourceTree = "<group>"; };
+		383B6BC5B4BA06F43865019D /* PlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerView.swift; sourceTree = "<group>"; };
+		9FF579464F45BEE410AC6F49 /* TridePlayer.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = TridePlayer.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		CF80F4A57607307224828CB7 /* TridePlayerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TridePlayerApp.swift; sourceTree = "<group>"; };
+		E4880F093BB367E063F7CC58 /* TrideKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = TrideKit; path = ../..; sourceTree = SOURCE_ROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		FA029A21A3F5F4C029BCA48E /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				144D414AD815ED939B865063 /* TrideKit in Frameworks */,
+				0C1C6237CCCF8522DF36CA9E /* TrideCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		513BF36133DB72E497256104 /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				E4880F093BB367E063F7CC58 /* TrideKit */,
+			);
+			name = Packages;
+			sourceTree = "<group>";
+		};
+		5970C3D8E5CD6D0526296971 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				9FF579464F45BEE410AC6F49 /* TridePlayer.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		97338A18D7AE7468DEB3830C /* TridePlayer */ = {
+			isa = PBXGroup;
+			children = (
+				1B9229E9DA1C020A2FF34BC0 /* BindingsPanel.swift */,
+				383B6BC5B4BA06F43865019D /* PlayerView.swift */,
+				CF80F4A57607307224828CB7 /* TridePlayerApp.swift */,
+			);
+			path = TridePlayer;
+			sourceTree = "<group>";
+		};
+		F74BD9116898B40F4F85EF82 = {
+			isa = PBXGroup;
+			children = (
+				513BF36133DB72E497256104 /* Packages */,
+				97338A18D7AE7468DEB3830C /* TridePlayer */,
+				5970C3D8E5CD6D0526296971 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		71D55C7BDCE8E83437C3A6F8 /* TridePlayer */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E493B8ABC86943EC3F8107AA /* Build configuration list for PBXNativeTarget "TridePlayer" */;
+			buildPhases = (
+				CB064B06F49F8049038CF06D /* Sources */,
+				FA029A21A3F5F4C029BCA48E /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				483AE8CABCF769B69F25035B /* PBXTargetDependency */,
+			);
+			name = TridePlayer;
+			packageProductDependencies = (
+				F20BFD707AEB2783C9DEE6BF /* TrideKit */,
+				FBD14FAC9DC023BD2ECF8108 /* TrideCore */,
+			);
+			productName = TridePlayer;
+			productReference = 9FF579464F45BEE410AC6F49 /* TridePlayer.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		766A4311023EC707D6FE64C0 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					71D55C7BDCE8E83437C3A6F8 = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 21A64D309ECCE66A2D3DE0DE /* Build configuration list for PBXProject "TridePlayer" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = F74BD9116898B40F4F85EF82;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				3AC53325B669A6F9A3030008 /* XCLocalSwiftPackageReference "../.." */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 5970C3D8E5CD6D0526296971 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				71D55C7BDCE8E83437C3A6F8 /* TridePlayer */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		CB064B06F49F8049038CF06D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2168847C72D5A5D90A2D42C6 /* BindingsPanel.swift in Sources */,
+				46A0B059674757FFF2C89247 /* PlayerView.swift in Sources */,
+				8675DDE939F9B6010F1E6838 /* TridePlayerApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		483AE8CABCF769B69F25035B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			productRef = 0893A6DC71838237E802074D /* TrideMaterials */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		63683BAE7E1390377B173A5C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Tride Player";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.tride.player;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		755915CDC6FF47456C0A0497 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Tride Player";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.tride.player;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		97B2AD525278E0E1BC0776A9 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.10;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		A5D948826D6B4070881A69AC /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.10;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		21A64D309ECCE66A2D3DE0DE /* Build configuration list for PBXProject "TridePlayer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A5D948826D6B4070881A69AC /* Debug */,
+				97B2AD525278E0E1BC0776A9 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		E493B8ABC86943EC3F8107AA /* Build configuration list for PBXNativeTarget "TridePlayer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				755915CDC6FF47456C0A0497 /* Debug */,
+				63683BAE7E1390377B173A5C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		3AC53325B669A6F9A3030008 /* XCLocalSwiftPackageReference "../.." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../..;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		0893A6DC71838237E802074D /* TrideMaterials */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = "plugin:TrideMaterials";
+		};
+		F20BFD707AEB2783C9DEE6BF /* TrideKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = TrideKit;
+		};
+		FBD14FAC9DC023BD2ECF8108 /* TrideCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = TrideCore;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 766A4311023EC707D6FE64C0 /* Project object */;
+}
