@@ -627,7 +627,8 @@ public protocol TrideSceneProtocol : AnyObject {
     
     /**
      * Raw bytes of an archive asset (`assets/…`, e.g. the image behind
-     * [`TrideTextureRef::uri`]); `None` when the path is not in the archive.
+     * [`TrideTextureRef::uri`]); `None` when the path is not in the archive, or only an older
+     * file's glTF carrier named it (one notice).
      */
     func assetBytes(uri: String)  -> Data?
     
@@ -686,7 +687,9 @@ public protocol TrideSceneProtocol : AnyObject {
      * material — the mesh the host instances at every module frame (data-texture
      * instancing); a parametric datablock at its effective recipe
      * (pull again after `/datablocks/{uid}/geometry`). `None` when the uid is
-     * unknown / malformed or the decode fails (the host logs it).
+     * unknown / malformed or the decode fails (the host logs it). A view built again reads every
+     * mesh. The one core path the WASM `RuntimeHandle.datablockMesh` takes too
+     * (`tride_runtime_api::SourceData::datablock_mesh`).
      */
     func datablockMesh(uid: String)  -> TrideDatablockMesh?
     
@@ -853,19 +856,6 @@ public protocol TrideSceneProtocol : AnyObject {
     func listCameras()  -> [TrideCameraDescriptor]
     
     /**
-     * Carrier metadata table:
-     * `light.id | camera.id → glTF node index of its baked CARRIER node` — the
-     * one `TransformManager` node a light/camera owns in `scene.gltf`. Bridges
-     * attach / reuse the gltfio-born Light or Camera component on that entity
-     * so a grouped light/camera inherits its parent chain from the glTF
-     * hierarchy (no bridge-side world compose). Same entry type as
-     * [`Self::list_node_metadata`] (disjoint id spaces). Empty for archives
-     * baked before `carrierMetadata` → bridges degrade warn-once to the
-     * manifest pose.
-     */
-    func listCarrierMetadata()  -> [TrideNodeMetaEntry]
-    
-    /**
      * Uids of every node drawn bent now.
      */
     func listDeformedNodes()  -> [String]
@@ -883,13 +873,6 @@ public protocol TrideSceneProtocol : AnyObject {
      * enumerate at load to build Filament light entities.
      */
     func listLights()  -> [TrideLightDescriptor]
-    
-    /**
-     * Node metadata table for `/node/{id}` pointer resolution (Wave 6).
-     * Returns the mapping from manifest node IDs to glTF node indices.
-     * Empty for legacy `.trd` archives that pre-date this field.
-     */
-    func listNodeMetadata()  -> [TrideNodeMetaEntry]
     
     /**
      * Nodes drawn from a parametric datablock, in manifest order — linked
@@ -932,6 +915,14 @@ public protocol TrideSceneProtocol : AnyObject {
      * the slug is unknown.
      */
     func materialParams(slug: String)  -> TrideMaterialParams?
+    
+    /**
+     * The node table's world matrices after the last tick: LE `f32`, 64 bytes per node,
+     * column-major, nodes in `scene_record().nodes` order (empty when the scene's lock is
+     * poisoned). A diagnostic for the host's check mode (gate A = B of E6): the host compares
+     * the worlds its entities are drawn at with these; it does not call it to draw.
+     */
+    func nodeWorlds()  -> Data
     
     /**
      * Every node under view point `(x, y)`, nearest first — empty without a
@@ -988,7 +979,8 @@ public protocol TrideSceneProtocol : AnyObject {
     func requestFullFrame() throws 
     
     /**
-     * Preview reset: initial SM state, view-model defaults, glTF baseline.
+     * Preview reset: initial SM state, view-model defaults, the node table back to the
+     * manifest's poses.
      * Uses the scene timeline position from the last [`Self::tick`] (`0` if never ticked).
      */
     func reset() throws 
@@ -1002,12 +994,6 @@ public protocol TrideSceneProtocol : AnyObject {
     func resetAudio(input: String) throws 
     
     /**
-     * Archive paths of every resource besides the manifest and `scene.gltf` (`scene.bin`,
-     * `assets/…`), sorted; each is readable through [`Self::asset_bytes`].
-     */
-    func resourceNames()  -> [String]
-    
-    /**
      * The host's tick loop runs again after standing still (the view off screen, the app in the
      * background): the scroll speed is measured afresh from the next [`Self::tick`] instead of
      * reading the page's move meanwhile as one frame's jump. Call it before that tick.
@@ -1018,11 +1004,10 @@ public protocol TrideSceneProtocol : AnyObject {
     func resume() throws 
     
     /**
-     * The archive's `scene.gltf` — the JSON document a glTF loader reads, with its buffer and
-     * image URIs as the archive names them (see [`Self::resource_names`]). A host needs no zip
-     * reader of its own: this plus [`Self::asset_bytes`] is the whole scene.
+     * The scene record: nodes, materials per family, skins, lights, cameras,
+     * images — the scene as loaded. `None` only when the scene's lock is poisoned.
      */
-    func sceneGltfBytes()  -> Data
+    func sceneRecord()  -> TrideSceneRecord?
     
     /**
      * The host's page or scroll view, in points: how far it is scrolled (`offset`), the visible
@@ -1062,6 +1047,13 @@ public protocol TrideSceneProtocol : AnyObject {
      * them out — the host keeps every value until it is written again. Off by default.
      */
     func setChangedOnly(enabled: Bool) throws 
+    
+    /**
+     * Hand out `/node/{uid}/drawVisible` — each node's visibility to the renderer, its own flag
+     * and every ancestor's — every node on the next tick, then the ones that changed (all again
+     * after `reset` / `request_full_frame`). Off by default: the stream is what it was.
+     */
+    func setDrawVisibility(enabled: Bool) throws 
     
     /**
      * A picture of `width × height` px — decoded, downscaled to 2048 on the long side, EXIF-turned
@@ -1295,7 +1287,8 @@ open func appendAudio(input: String, startTimeS: Double, pcm: [Float])throws  {t
     
     /**
      * Raw bytes of an archive asset (`assets/…`, e.g. the image behind
-     * [`TrideTextureRef::uri`]); `None` when the path is not in the archive.
+     * [`TrideTextureRef::uri`]); `None` when the path is not in the archive, or only an older
+     * file's glTF carrier named it (one notice).
      */
 open func assetBytes(uri: String) -> Data? {
     return try!  FfiConverterOptionData.lift(try! rustCall() {
@@ -1395,7 +1388,9 @@ open func currentState() -> String {
      * material — the mesh the host instances at every module frame (data-texture
      * instancing); a parametric datablock at its effective recipe
      * (pull again after `/datablocks/{uid}/geometry`). `None` when the uid is
-     * unknown / malformed or the decode fails (the host logs it).
+     * unknown / malformed or the decode fails (the host logs it). A view built again reads every
+     * mesh. The one core path the WASM `RuntimeHandle.datablockMesh` takes too
+     * (`tride_runtime_api::SourceData::datablock_mesh`).
      */
 open func datablockMesh(uid: String) -> TrideDatablockMesh? {
     return try!  FfiConverterOptionTypeTrideDatablockMesh.lift(try! rustCall() {
@@ -1704,24 +1699,6 @@ open func listCameras() -> [TrideCameraDescriptor] {
 }
     
     /**
-     * Carrier metadata table:
-     * `light.id | camera.id → glTF node index of its baked CARRIER node` — the
-     * one `TransformManager` node a light/camera owns in `scene.gltf`. Bridges
-     * attach / reuse the gltfio-born Light or Camera component on that entity
-     * so a grouped light/camera inherits its parent chain from the glTF
-     * hierarchy (no bridge-side world compose). Same entry type as
-     * [`Self::list_node_metadata`] (disjoint id spaces). Empty for archives
-     * baked before `carrierMetadata` → bridges degrade warn-once to the
-     * manifest pose.
-     */
-open func listCarrierMetadata() -> [TrideNodeMetaEntry] {
-    return try!  FfiConverterSequenceTypeTrideNodeMetaEntry.lift(try! rustCall() {
-    uniffi_tride_ffi_fn_method_tridescene_list_carrier_metadata(self.uniffiClonePointer(),$0
-    )
-})
-}
-    
-    /**
      * Uids of every node drawn bent now.
      */
 open func listDeformedNodes() -> [String] {
@@ -1751,18 +1728,6 @@ open func listGenerators() -> [TrideGeneratorDescriptor] {
 open func listLights() -> [TrideLightDescriptor] {
     return try!  FfiConverterSequenceTypeTrideLightDescriptor.lift(try! rustCall() {
     uniffi_tride_ffi_fn_method_tridescene_list_lights(self.uniffiClonePointer(),$0
-    )
-})
-}
-    
-    /**
-     * Node metadata table for `/node/{id}` pointer resolution (Wave 6).
-     * Returns the mapping from manifest node IDs to glTF node indices.
-     * Empty for legacy `.trd` archives that pre-date this field.
-     */
-open func listNodeMetadata() -> [TrideNodeMetaEntry] {
-    return try!  FfiConverterSequenceTypeTrideNodeMetaEntry.lift(try! rustCall() {
-    uniffi_tride_ffi_fn_method_tridescene_list_node_metadata(self.uniffiClonePointer(),$0
     )
 })
 }
@@ -1840,6 +1805,19 @@ open func materialParams(slug: String) -> TrideMaterialParams? {
     return try!  FfiConverterOptionTypeTrideMaterialParams.lift(try! rustCall() {
     uniffi_tride_ffi_fn_method_tridescene_material_params(self.uniffiClonePointer(),
         FfiConverterString.lower(slug),$0
+    )
+})
+}
+    
+    /**
+     * The node table's world matrices after the last tick: LE `f32`, 64 bytes per node,
+     * column-major, nodes in `scene_record().nodes` order (empty when the scene's lock is
+     * poisoned). A diagnostic for the host's check mode (gate A = B of E6): the host compares
+     * the worlds its entities are drawn at with these; it does not call it to draw.
+     */
+open func nodeWorlds() -> Data {
+    return try!  FfiConverterData.lift(try! rustCall() {
+    uniffi_tride_ffi_fn_method_tridescene_node_worlds(self.uniffiClonePointer(),$0
     )
 })
 }
@@ -1939,7 +1917,8 @@ open func requestFullFrame()throws  {try rustCallWithError(FfiConverterTypeTride
 }
     
     /**
-     * Preview reset: initial SM state, view-model defaults, glTF baseline.
+     * Preview reset: initial SM state, view-model defaults, the node table back to the
+     * manifest's poses.
      * Uses the scene timeline position from the last [`Self::tick`] (`0` if never ticked).
      */
 open func reset()throws  {try rustCallWithError(FfiConverterTypeTrideError.lift) {
@@ -1962,17 +1941,6 @@ open func resetAudio(input: String)throws  {try rustCallWithError(FfiConverterTy
 }
     
     /**
-     * Archive paths of every resource besides the manifest and `scene.gltf` (`scene.bin`,
-     * `assets/…`), sorted; each is readable through [`Self::asset_bytes`].
-     */
-open func resourceNames() -> [String] {
-    return try!  FfiConverterSequenceString.lift(try! rustCall() {
-    uniffi_tride_ffi_fn_method_tridescene_resource_names(self.uniffiClonePointer(),$0
-    )
-})
-}
-    
-    /**
      * The host's tick loop runs again after standing still (the view off screen, the app in the
      * background): the scroll speed is measured afresh from the next [`Self::tick`] instead of
      * reading the page's move meanwhile as one frame's jump. Call it before that tick.
@@ -1987,13 +1955,12 @@ open func resume()throws  {try rustCallWithError(FfiConverterTypeTrideError.lift
 }
     
     /**
-     * The archive's `scene.gltf` — the JSON document a glTF loader reads, with its buffer and
-     * image URIs as the archive names them (see [`Self::resource_names`]). A host needs no zip
-     * reader of its own: this plus [`Self::asset_bytes`] is the whole scene.
+     * The scene record: nodes, materials per family, skins, lights, cameras,
+     * images — the scene as loaded. `None` only when the scene's lock is poisoned.
      */
-open func sceneGltfBytes() -> Data {
-    return try!  FfiConverterData.lift(try! rustCall() {
-    uniffi_tride_ffi_fn_method_tridescene_scene_gltf_bytes(self.uniffiClonePointer(),$0
+open func sceneRecord() -> TrideSceneRecord? {
+    return try!  FfiConverterOptionTypeTrideSceneRecord.lift(try! rustCall() {
+    uniffi_tride_ffi_fn_method_tridescene_scene_record(self.uniffiClonePointer(),$0
     )
 })
 }
@@ -2058,6 +2025,18 @@ open func setBinding(name: String, value: TrideValue)throws  {try rustCallWithEr
      */
 open func setChangedOnly(enabled: Bool)throws  {try rustCallWithError(FfiConverterTypeTrideError.lift) {
     uniffi_tride_ffi_fn_method_tridescene_set_changed_only(self.uniffiClonePointer(),
+        FfiConverterBool.lower(enabled),$0
+    )
+}
+}
+    
+    /**
+     * Hand out `/node/{uid}/drawVisible` — each node's visibility to the renderer, its own flag
+     * and every ancestor's — every node on the next tick, then the ones that changed (all again
+     * after `reset` / `request_full_frame`). Off by default: the stream is what it was.
+     */
+open func setDrawVisibility(enabled: Bool)throws  {try rustCallWithError(FfiConverterTypeTrideError.lift) {
+    uniffi_tride_ffi_fn_method_tridescene_set_draw_visibility(self.uniffiClonePointer(),
         FfiConverterBool.lower(enabled),$0
     )
 }
@@ -2522,6 +2501,12 @@ public struct TickResult {
      * Per-binding eval failures collected during this tick.
      */
     public var diagnostics: [EvalDiagnostic]
+    /**
+     * The skins' palettes this tick moved (only changed ones; all after load, `reset` and
+     * `request_full_frame`): `setBones` per mesh part, the part's box beside. After `advance`,
+     * the last of each one its ticks moved. Additive (R-FFIStability).
+     */
+    public var bonePalettes: [TrideBonePalette]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -2534,10 +2519,16 @@ public struct TickResult {
          */mutations: [TrideMutation], 
         /**
          * Per-binding eval failures collected during this tick.
-         */diagnostics: [EvalDiagnostic]) {
+         */diagnostics: [EvalDiagnostic], 
+        /**
+         * The skins' palettes this tick moved (only changed ones; all after load, `reset` and
+         * `request_full_frame`): `setBones` per mesh part, the part's box beside. After `advance`,
+         * the last of each one its ticks moved. Additive (R-FFIStability).
+         */bonePalettes: [TrideBonePalette] = []) {
         self.dirtyPointers = dirtyPointers
         self.mutations = mutations
         self.diagnostics = diagnostics
+        self.bonePalettes = bonePalettes
     }
 }
 
@@ -2554,6 +2545,9 @@ extension TickResult: Equatable, Hashable {
         if lhs.diagnostics != rhs.diagnostics {
             return false
         }
+        if lhs.bonePalettes != rhs.bonePalettes {
+            return false
+        }
         return true
     }
 
@@ -2561,6 +2555,7 @@ extension TickResult: Equatable, Hashable {
         hasher.combine(dirtyPointers)
         hasher.combine(mutations)
         hasher.combine(diagnostics)
+        hasher.combine(bonePalettes)
     }
 }
 
@@ -2574,7 +2569,8 @@ public struct FfiConverterTypeTickResult: FfiConverterRustBuffer {
             try TickResult(
                 dirtyPointers: FfiConverterSequenceString.read(from: &buf), 
                 mutations: FfiConverterSequenceTypeTrideMutation.read(from: &buf), 
-                diagnostics: FfiConverterSequenceTypeEvalDiagnostic.read(from: &buf)
+                diagnostics: FfiConverterSequenceTypeEvalDiagnostic.read(from: &buf), 
+                bonePalettes: FfiConverterSequenceTypeTrideBonePalette.read(from: &buf)
         )
     }
 
@@ -2582,6 +2578,7 @@ public struct FfiConverterTypeTickResult: FfiConverterRustBuffer {
         FfiConverterSequenceString.write(value.dirtyPointers, into: &buf)
         FfiConverterSequenceTypeTrideMutation.write(value.mutations, into: &buf)
         FfiConverterSequenceTypeEvalDiagnostic.write(value.diagnostics, into: &buf)
+        FfiConverterSequenceTypeTrideBonePalette.write(value.bonePalettes, into: &buf)
     }
 }
 
@@ -2836,6 +2833,131 @@ public func FfiConverterTypeTrideBloomOptions_lower(_ value: TrideBloomOptions) 
 
 
 /**
+ * One skinned mesh part's bones of a tick.
+ */
+public struct TrideBonePalette {
+    /**
+     * The mesh node's row (`TrideSceneRecord::nodes`).
+     */
+    public var mesh: UInt32
+    /**
+     * The skin, by position in `TrideSceneRecord::skins`.
+     */
+    public var skin: UInt32
+    /**
+     * The part ([`TrideSkinPart::part`]); 0 for an unsplit mesh.
+     */
+    public var part: UInt32
+    /**
+     * `inv(W_mesh) × W_joint × IBM` per joint of the part, its order: little-endian `f32 × 16`
+     * column-major each.
+     */
+    public var bones: Data
+    /**
+     * The part's mesh-space box under these bones; `None` = no bone weighs a vertex.
+     */
+    public var bounds: TrideBounds?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The mesh node's row (`TrideSceneRecord::nodes`).
+         */mesh: UInt32, 
+        /**
+         * The skin, by position in `TrideSceneRecord::skins`.
+         */skin: UInt32, 
+        /**
+         * The part ([`TrideSkinPart::part`]); 0 for an unsplit mesh.
+         */part: UInt32, 
+        /**
+         * `inv(W_mesh) × W_joint × IBM` per joint of the part, its order: little-endian `f32 × 16`
+         * column-major each.
+         */bones: Data, 
+        /**
+         * The part's mesh-space box under these bones; `None` = no bone weighs a vertex.
+         */bounds: TrideBounds?) {
+        self.mesh = mesh
+        self.skin = skin
+        self.part = part
+        self.bones = bones
+        self.bounds = bounds
+    }
+}
+
+
+
+extension TrideBonePalette: Equatable, Hashable {
+    public static func ==(lhs: TrideBonePalette, rhs: TrideBonePalette) -> Bool {
+        if lhs.mesh != rhs.mesh {
+            return false
+        }
+        if lhs.skin != rhs.skin {
+            return false
+        }
+        if lhs.part != rhs.part {
+            return false
+        }
+        if lhs.bones != rhs.bones {
+            return false
+        }
+        if lhs.bounds != rhs.bounds {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(mesh)
+        hasher.combine(skin)
+        hasher.combine(part)
+        hasher.combine(bones)
+        hasher.combine(bounds)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideBonePalette: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideBonePalette {
+        return
+            try TrideBonePalette(
+                mesh: FfiConverterUInt32.read(from: &buf), 
+                skin: FfiConverterUInt32.read(from: &buf), 
+                part: FfiConverterUInt32.read(from: &buf), 
+                bones: FfiConverterData.read(from: &buf), 
+                bounds: FfiConverterOptionTypeTrideBounds.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideBonePalette, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.mesh, into: &buf)
+        FfiConverterUInt32.write(value.skin, into: &buf)
+        FfiConverterUInt32.write(value.part, into: &buf)
+        FfiConverterData.write(value.bones, into: &buf)
+        FfiConverterOptionTypeTrideBounds.write(value.bounds, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideBonePalette_lift(_ buf: RustBuffer) throws -> TrideBonePalette {
+    return try FfiConverterTypeTrideBonePalette.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideBonePalette_lower(_ value: TrideBonePalette) -> RustBuffer {
+    return FfiConverterTypeTrideBonePalette.lower(value)
+}
+
+
+/**
  * One host binding of an input.
  */
 public struct TrideBoundInput {
@@ -2909,6 +3031,87 @@ public func FfiConverterTypeTrideBoundInput_lift(_ buf: RustBuffer) throws -> Tr
 #endif
 public func FfiConverterTypeTrideBoundInput_lower(_ value: TrideBoundInput) -> RustBuffer {
     return FfiConverterTypeTrideBoundInput.lower(value)
+}
+
+
+/**
+ * A mesh-space axis-aligned box.
+ */
+public struct TrideBounds {
+    /**
+     * `xyz`.
+     */
+    public var min: [Float]
+    /**
+     * `xyz`.
+     */
+    public var max: [Float]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * `xyz`.
+         */min: [Float], 
+        /**
+         * `xyz`.
+         */max: [Float]) {
+        self.min = min
+        self.max = max
+    }
+}
+
+
+
+extension TrideBounds: Equatable, Hashable {
+    public static func ==(lhs: TrideBounds, rhs: TrideBounds) -> Bool {
+        if lhs.min != rhs.min {
+            return false
+        }
+        if lhs.max != rhs.max {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(min)
+        hasher.combine(max)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideBounds: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideBounds {
+        return
+            try TrideBounds(
+                min: FfiConverterSequenceFloat.read(from: &buf), 
+                max: FfiConverterSequenceFloat.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideBounds, into buf: inout [UInt8]) {
+        FfiConverterSequenceFloat.write(value.min, into: &buf)
+        FfiConverterSequenceFloat.write(value.max, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideBounds_lift(_ buf: RustBuffer) throws -> TrideBounds {
+    return try FfiConverterTypeTrideBounds.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideBounds_lower(_ value: TrideBounds) -> RustBuffer {
+    return FfiConverterTypeTrideBounds.lower(value)
 }
 
 
@@ -3291,7 +3494,8 @@ public struct TrideDatablockMesh {
      */
     public var normals: Data
     /**
-     * Empty when the datablock carries no `TEXCOORD_0`.
+     * Empty when the datablock carries no `TEXCOORD_0`; a primitive without it beside one with
+     * it reads (1, 1), gltfio's dummy UV.
      */
     public var uvs: Data
     /**
@@ -3306,8 +3510,9 @@ public struct TrideDatablockMesh {
      */
     public var contentHash: String
     /**
-     * Little-endian `f32` glTF `TANGENT` (`xyzw`) per vertex, `MikkTSpace`, while
-     * `material` draws a normal map; empty otherwise — the bridge frames by the normal alone.
+     * Little-endian `f32` glTF `TANGENT` (`xyzw`, w = handedness) per vertex: the datablock's
+     * own stream when it carries one, else `MikkTSpace` while `material` draws a normal map;
+     * empty otherwise — the bridge frames by the normal alone.
      */
     public var tangents: Data
     /**
@@ -3316,6 +3521,63 @@ public struct TrideDatablockMesh {
      * mesh is one group wearing `material_params`. Additive (R-FFIStability).
      */
     public var groups: [TrideGeometryGroup]
+    /**
+     * Little-endian `f32` `TEXCOORD_1` per vertex; `None` when the datablock carries none. A
+     * bridge that draws one UV set ignores it. Additive (R-FFIStability).
+     */
+    public var uvs1: Data?
+    /**
+     * How `indices` assemble — `"triangles"`; every group draws it. Additive.
+     */
+    public var topology: String
+    /**
+     * gltfio's ubershader key of the first group — the one group of a mesh without `groups`;
+     * each group carries its own. Additive (R-FFIStability).
+     */
+    public var materialKey: TrideMaterialKey?
+    /**
+     * The datablock's points / lines / line and triangle strips (glTF modes 0, 1, 3, 5): one
+     * mesh each with its own streams and indices, drawn as more primitives of the same
+     * renderable, as gltfio draws them. Empty for a triangle-list-only datablock. Additive.
+     */
+    public var parts: [TrideDatablockPart]
+    /**
+     * Morph targets (glTF §3.7.2.2), the deltas over this mesh's vertices. Additive.
+     */
+    public var morphTargets: [TrideMorphTarget]
+    /**
+     * Mesh-space box of every position, widened by each vertex's `Σ|δ|` over the morph targets
+     * (weights in [−1, 1]); `None` without vertices. A skinned mesh's is its bind pose:
+     * [`TickResult::bone_palettes`] bring each part's box per tick. Additive.
+     */
+    public var bounds: TrideBounds?
+    /**
+     * Little-endian `u16 × 4` `JOINTS_0` per vertex: positions in `skin.joints`, or in the
+     * part's palette once cut (`skin_parts`); `None` without influences. Additive.
+     */
+    public var joints: Data?
+    /**
+     * Little-endian `f32 × 4` `WEIGHTS_0` per vertex, an `f32` set normalized to sum 1 as
+     * gltfio's `normalizeSkinningWeights`; as long as `joints`. Additive.
+     */
+    public var weights: Data?
+    /**
+     * A skin over 256 joints cut into parts, each an index range of a group with its own
+     * palette (≤ 256 joints), numbered across the datablock (this mesh, then `parts`). Empty =
+     * one part, the skin's joints in order. Additive.
+     */
+    public var skinParts: [TrideSkinPart]
+    /**
+     * The attributes of the first group — the one group of a mesh without `groups`; each group
+     * carries its own. `None` for a built mesh (its streams are whole). Additive.
+     */
+    public var attributes: TrideVertexAttributes?
+    /**
+     * The streams the file stores as integers the GPU widens (`KHR_mesh_quantization`): upload
+     * these to the `VertexBuffer` in place of the `f32` stream of the same name, which stays for
+     * CPU work (`SurfaceOrientation`); `None` = every stream is `f32`. Additive.
+     */
+    public var stored: TrideStoredStreams?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -3332,7 +3594,8 @@ public struct TrideDatablockMesh {
          * Empty when the datablock carries no normals.
          */normals: Data, 
         /**
-         * Empty when the datablock carries no `TEXCOORD_0`.
+         * Empty when the datablock carries no `TEXCOORD_0`; a primitive without it beside one with
+         * it reads (1, 1), gltfio's dummy UV.
          */uvs: Data, 
         /**
          * RGBA `f32` per vertex from `COLOR_0`, empty when the datablock carries none.
@@ -3343,14 +3606,61 @@ public struct TrideDatablockMesh {
          * under the same uid when this changes.
          */contentHash: String, 
         /**
-         * Little-endian `f32` glTF `TANGENT` (`xyzw`) per vertex, `MikkTSpace`, while
-         * `material` draws a normal map; empty otherwise — the bridge frames by the normal alone.
+         * Little-endian `f32` glTF `TANGENT` (`xyzw`, w = handedness) per vertex: the datablock's
+         * own stream when it carries one, else `MikkTSpace` while `material` draws a normal map;
+         * empty otherwise — the bridge frames by the normal alone.
          */tangents: Data, 
         /**
          * Draw groups in index order, each with its own look (its palette entry, else the glTF
          * default): an Extrude cloned as a module — face / back / side / fillet. Empty = the whole
          * mesh is one group wearing `material_params`. Additive (R-FFIStability).
-         */groups: [TrideGeometryGroup]) {
+         */groups: [TrideGeometryGroup], 
+        /**
+         * Little-endian `f32` `TEXCOORD_1` per vertex; `None` when the datablock carries none. A
+         * bridge that draws one UV set ignores it. Additive (R-FFIStability).
+         */uvs1: Data? = nil, 
+        /**
+         * How `indices` assemble — `"triangles"`; every group draws it. Additive.
+         */topology: String = "triangles", 
+        /**
+         * gltfio's ubershader key of the first group — the one group of a mesh without `groups`;
+         * each group carries its own. Additive (R-FFIStability).
+         */materialKey: TrideMaterialKey? = nil, 
+        /**
+         * The datablock's points / lines / line and triangle strips (glTF modes 0, 1, 3, 5): one
+         * mesh each with its own streams and indices, drawn as more primitives of the same
+         * renderable, as gltfio draws them. Empty for a triangle-list-only datablock. Additive.
+         */parts: [TrideDatablockPart] = [], 
+        /**
+         * Morph targets (glTF §3.7.2.2), the deltas over this mesh's vertices. Additive.
+         */morphTargets: [TrideMorphTarget] = [], 
+        /**
+         * Mesh-space box of every position, widened by each vertex's `Σ|δ|` over the morph targets
+         * (weights in [−1, 1]); `None` without vertices. A skinned mesh's is its bind pose:
+         * [`TickResult::bone_palettes`] bring each part's box per tick. Additive.
+         */bounds: TrideBounds? = nil, 
+        /**
+         * Little-endian `u16 × 4` `JOINTS_0` per vertex: positions in `skin.joints`, or in the
+         * part's palette once cut (`skin_parts`); `None` without influences. Additive.
+         */joints: Data? = nil, 
+        /**
+         * Little-endian `f32 × 4` `WEIGHTS_0` per vertex, an `f32` set normalized to sum 1 as
+         * gltfio's `normalizeSkinningWeights`; as long as `joints`. Additive.
+         */weights: Data? = nil, 
+        /**
+         * A skin over 256 joints cut into parts, each an index range of a group with its own
+         * palette (≤ 256 joints), numbered across the datablock (this mesh, then `parts`). Empty =
+         * one part, the skin's joints in order. Additive.
+         */skinParts: [TrideSkinPart] = [], 
+        /**
+         * The attributes of the first group — the one group of a mesh without `groups`; each group
+         * carries its own. `None` for a built mesh (its streams are whole). Additive.
+         */attributes: TrideVertexAttributes? = nil, 
+        /**
+         * The streams the file stores as integers the GPU widens (`KHR_mesh_quantization`): upload
+         * these to the `VertexBuffer` in place of the `f32` stream of the same name, which stays for
+         * CPU work (`SurfaceOrientation`); `None` = every stream is `f32`. Additive.
+         */stored: TrideStoredStreams? = nil) {
         self.uid = uid
         self.material = material
         self.materialParams = materialParams
@@ -3362,6 +3672,17 @@ public struct TrideDatablockMesh {
         self.contentHash = contentHash
         self.tangents = tangents
         self.groups = groups
+        self.uvs1 = uvs1
+        self.topology = topology
+        self.materialKey = materialKey
+        self.parts = parts
+        self.morphTargets = morphTargets
+        self.bounds = bounds
+        self.joints = joints
+        self.weights = weights
+        self.skinParts = skinParts
+        self.attributes = attributes
+        self.stored = stored
     }
 }
 
@@ -3402,6 +3723,39 @@ extension TrideDatablockMesh: Equatable, Hashable {
         if lhs.groups != rhs.groups {
             return false
         }
+        if lhs.uvs1 != rhs.uvs1 {
+            return false
+        }
+        if lhs.topology != rhs.topology {
+            return false
+        }
+        if lhs.materialKey != rhs.materialKey {
+            return false
+        }
+        if lhs.parts != rhs.parts {
+            return false
+        }
+        if lhs.morphTargets != rhs.morphTargets {
+            return false
+        }
+        if lhs.bounds != rhs.bounds {
+            return false
+        }
+        if lhs.joints != rhs.joints {
+            return false
+        }
+        if lhs.weights != rhs.weights {
+            return false
+        }
+        if lhs.skinParts != rhs.skinParts {
+            return false
+        }
+        if lhs.attributes != rhs.attributes {
+            return false
+        }
+        if lhs.stored != rhs.stored {
+            return false
+        }
         return true
     }
 
@@ -3417,6 +3771,17 @@ extension TrideDatablockMesh: Equatable, Hashable {
         hasher.combine(contentHash)
         hasher.combine(tangents)
         hasher.combine(groups)
+        hasher.combine(uvs1)
+        hasher.combine(topology)
+        hasher.combine(materialKey)
+        hasher.combine(parts)
+        hasher.combine(morphTargets)
+        hasher.combine(bounds)
+        hasher.combine(joints)
+        hasher.combine(weights)
+        hasher.combine(skinParts)
+        hasher.combine(attributes)
+        hasher.combine(stored)
     }
 }
 
@@ -3438,7 +3803,18 @@ public struct FfiConverterTypeTrideDatablockMesh: FfiConverterRustBuffer {
                 indices: FfiConverterData.read(from: &buf), 
                 contentHash: FfiConverterString.read(from: &buf), 
                 tangents: FfiConverterData.read(from: &buf), 
-                groups: FfiConverterSequenceTypeTrideGeometryGroup.read(from: &buf)
+                groups: FfiConverterSequenceTypeTrideGeometryGroup.read(from: &buf), 
+                uvs1: FfiConverterOptionData.read(from: &buf), 
+                topology: FfiConverterString.read(from: &buf), 
+                materialKey: FfiConverterOptionTypeTrideMaterialKey.read(from: &buf), 
+                parts: FfiConverterSequenceTypeTrideDatablockPart.read(from: &buf), 
+                morphTargets: FfiConverterSequenceTypeTrideMorphTarget.read(from: &buf), 
+                bounds: FfiConverterOptionTypeTrideBounds.read(from: &buf), 
+                joints: FfiConverterOptionData.read(from: &buf), 
+                weights: FfiConverterOptionData.read(from: &buf), 
+                skinParts: FfiConverterSequenceTypeTrideSkinPart.read(from: &buf), 
+                attributes: FfiConverterOptionTypeTrideVertexAttributes.read(from: &buf), 
+                stored: FfiConverterOptionTypeTrideStoredStreams.read(from: &buf)
         )
     }
 
@@ -3454,6 +3830,17 @@ public struct FfiConverterTypeTrideDatablockMesh: FfiConverterRustBuffer {
         FfiConverterString.write(value.contentHash, into: &buf)
         FfiConverterData.write(value.tangents, into: &buf)
         FfiConverterSequenceTypeTrideGeometryGroup.write(value.groups, into: &buf)
+        FfiConverterOptionData.write(value.uvs1, into: &buf)
+        FfiConverterString.write(value.topology, into: &buf)
+        FfiConverterOptionTypeTrideMaterialKey.write(value.materialKey, into: &buf)
+        FfiConverterSequenceTypeTrideDatablockPart.write(value.parts, into: &buf)
+        FfiConverterSequenceTypeTrideMorphTarget.write(value.morphTargets, into: &buf)
+        FfiConverterOptionTypeTrideBounds.write(value.bounds, into: &buf)
+        FfiConverterOptionData.write(value.joints, into: &buf)
+        FfiConverterOptionData.write(value.weights, into: &buf)
+        FfiConverterSequenceTypeTrideSkinPart.write(value.skinParts, into: &buf)
+        FfiConverterOptionTypeTrideVertexAttributes.write(value.attributes, into: &buf)
+        FfiConverterOptionTypeTrideStoredStreams.write(value.stored, into: &buf)
     }
 }
 
@@ -3470,6 +3857,230 @@ public func FfiConverterTypeTrideDatablockMesh_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypeTrideDatablockMesh_lower(_ value: TrideDatablockMesh) -> RustBuffer {
     return FfiConverterTypeTrideDatablockMesh.lower(value)
+}
+
+
+/**
+ * One point / line / strip primitive of a datablock ([`TrideDatablockMesh::parts`]): the
+ * mesh's fields for its own vertices — byte streams as there, its look, key and topology.
+ */
+public struct TrideDatablockPart {
+    /**
+     * `"points"`, `"lines"`, `"line_strip"` or `"triangle_strip"`; `"triangles"` / `"lines"`
+     * once a skin over 256 joints cut the strip.
+     */
+    public var topology: String
+    public var material: String?
+    public var materialParams: TrideMaterialParams?
+    public var materialKey: TrideMaterialKey
+    public var positions: Data
+    public var normals: Data
+    public var uvs: Data
+    public var uvs1: Data?
+    public var colors: Data
+    public var tangents: Data
+    public var indices: Data
+    public var morphTargets: [TrideMorphTarget]
+    public var bounds: TrideBounds?
+    /**
+     * Empty without influences.
+     */
+    public var joints: Data
+    public var weights: Data
+    public var skinParts: [TrideSkinPart]
+    /**
+     * As [`TrideDatablockMesh::attributes`]. Additive.
+     */
+    public var attributes: TrideVertexAttributes?
+    /**
+     * As [`TrideDatablockMesh::stored`]. Additive.
+     */
+    public var stored: TrideStoredStreams?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * `"points"`, `"lines"`, `"line_strip"` or `"triangle_strip"`; `"triangles"` / `"lines"`
+         * once a skin over 256 joints cut the strip.
+         */topology: String, material: String?, materialParams: TrideMaterialParams?, materialKey: TrideMaterialKey, positions: Data, normals: Data, uvs: Data, uvs1: Data?, colors: Data, tangents: Data, indices: Data, morphTargets: [TrideMorphTarget], bounds: TrideBounds?, 
+        /**
+         * Empty without influences.
+         */joints: Data, weights: Data, skinParts: [TrideSkinPart], 
+        /**
+         * As [`TrideDatablockMesh::attributes`]. Additive.
+         */attributes: TrideVertexAttributes? = nil, 
+        /**
+         * As [`TrideDatablockMesh::stored`]. Additive.
+         */stored: TrideStoredStreams? = nil) {
+        self.topology = topology
+        self.material = material
+        self.materialParams = materialParams
+        self.materialKey = materialKey
+        self.positions = positions
+        self.normals = normals
+        self.uvs = uvs
+        self.uvs1 = uvs1
+        self.colors = colors
+        self.tangents = tangents
+        self.indices = indices
+        self.morphTargets = morphTargets
+        self.bounds = bounds
+        self.joints = joints
+        self.weights = weights
+        self.skinParts = skinParts
+        self.attributes = attributes
+        self.stored = stored
+    }
+}
+
+
+
+extension TrideDatablockPart: Equatable, Hashable {
+    public static func ==(lhs: TrideDatablockPart, rhs: TrideDatablockPart) -> Bool {
+        if lhs.topology != rhs.topology {
+            return false
+        }
+        if lhs.material != rhs.material {
+            return false
+        }
+        if lhs.materialParams != rhs.materialParams {
+            return false
+        }
+        if lhs.materialKey != rhs.materialKey {
+            return false
+        }
+        if lhs.positions != rhs.positions {
+            return false
+        }
+        if lhs.normals != rhs.normals {
+            return false
+        }
+        if lhs.uvs != rhs.uvs {
+            return false
+        }
+        if lhs.uvs1 != rhs.uvs1 {
+            return false
+        }
+        if lhs.colors != rhs.colors {
+            return false
+        }
+        if lhs.tangents != rhs.tangents {
+            return false
+        }
+        if lhs.indices != rhs.indices {
+            return false
+        }
+        if lhs.morphTargets != rhs.morphTargets {
+            return false
+        }
+        if lhs.bounds != rhs.bounds {
+            return false
+        }
+        if lhs.joints != rhs.joints {
+            return false
+        }
+        if lhs.weights != rhs.weights {
+            return false
+        }
+        if lhs.skinParts != rhs.skinParts {
+            return false
+        }
+        if lhs.attributes != rhs.attributes {
+            return false
+        }
+        if lhs.stored != rhs.stored {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(topology)
+        hasher.combine(material)
+        hasher.combine(materialParams)
+        hasher.combine(materialKey)
+        hasher.combine(positions)
+        hasher.combine(normals)
+        hasher.combine(uvs)
+        hasher.combine(uvs1)
+        hasher.combine(colors)
+        hasher.combine(tangents)
+        hasher.combine(indices)
+        hasher.combine(morphTargets)
+        hasher.combine(bounds)
+        hasher.combine(joints)
+        hasher.combine(weights)
+        hasher.combine(skinParts)
+        hasher.combine(attributes)
+        hasher.combine(stored)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideDatablockPart: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideDatablockPart {
+        return
+            try TrideDatablockPart(
+                topology: FfiConverterString.read(from: &buf), 
+                material: FfiConverterOptionString.read(from: &buf), 
+                materialParams: FfiConverterOptionTypeTrideMaterialParams.read(from: &buf), 
+                materialKey: FfiConverterTypeTrideMaterialKey.read(from: &buf), 
+                positions: FfiConverterData.read(from: &buf), 
+                normals: FfiConverterData.read(from: &buf), 
+                uvs: FfiConverterData.read(from: &buf), 
+                uvs1: FfiConverterOptionData.read(from: &buf), 
+                colors: FfiConverterData.read(from: &buf), 
+                tangents: FfiConverterData.read(from: &buf), 
+                indices: FfiConverterData.read(from: &buf), 
+                morphTargets: FfiConverterSequenceTypeTrideMorphTarget.read(from: &buf), 
+                bounds: FfiConverterOptionTypeTrideBounds.read(from: &buf), 
+                joints: FfiConverterData.read(from: &buf), 
+                weights: FfiConverterData.read(from: &buf), 
+                skinParts: FfiConverterSequenceTypeTrideSkinPart.read(from: &buf), 
+                attributes: FfiConverterOptionTypeTrideVertexAttributes.read(from: &buf), 
+                stored: FfiConverterOptionTypeTrideStoredStreams.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideDatablockPart, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.topology, into: &buf)
+        FfiConverterOptionString.write(value.material, into: &buf)
+        FfiConverterOptionTypeTrideMaterialParams.write(value.materialParams, into: &buf)
+        FfiConverterTypeTrideMaterialKey.write(value.materialKey, into: &buf)
+        FfiConverterData.write(value.positions, into: &buf)
+        FfiConverterData.write(value.normals, into: &buf)
+        FfiConverterData.write(value.uvs, into: &buf)
+        FfiConverterOptionData.write(value.uvs1, into: &buf)
+        FfiConverterData.write(value.colors, into: &buf)
+        FfiConverterData.write(value.tangents, into: &buf)
+        FfiConverterData.write(value.indices, into: &buf)
+        FfiConverterSequenceTypeTrideMorphTarget.write(value.morphTargets, into: &buf)
+        FfiConverterOptionTypeTrideBounds.write(value.bounds, into: &buf)
+        FfiConverterData.write(value.joints, into: &buf)
+        FfiConverterData.write(value.weights, into: &buf)
+        FfiConverterSequenceTypeTrideSkinPart.write(value.skinParts, into: &buf)
+        FfiConverterOptionTypeTrideVertexAttributes.write(value.attributes, into: &buf)
+        FfiConverterOptionTypeTrideStoredStreams.write(value.stored, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideDatablockPart_lift(_ buf: RustBuffer) throws -> TrideDatablockPart {
+    return try FfiConverterTypeTrideDatablockPart.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideDatablockPart_lower(_ value: TrideDatablockPart) -> RustBuffer {
+    return FfiConverterTypeTrideDatablockPart.lower(value)
 }
 
 
@@ -4598,6 +5209,20 @@ public struct TrideGeometryGroup {
     public var materialParams: TrideMaterialParams?
     public var indexStart: UInt32
     public var indexCount: UInt32
+    /**
+     * A datablock mesh's group: gltfio's ubershader key of its primitive; `None` on a
+     * generator's trunk. Additive (R-FFIStability).
+     */
+    public var materialKey: TrideMaterialKey?
+    /**
+     * A datablock mesh's group: its mesh's `topology`; `None` on a generator's trunk. Additive.
+     */
+    public var topology: String?
+    /**
+     * A datablock mesh's group: which attributes its primitive carries in the file — the rows
+     * of the others are padding, never framed from. `None` on a generator's trunk. Additive.
+     */
+    public var attributes: TrideVertexAttributes?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -4607,11 +5232,25 @@ public struct TrideGeometryGroup {
          */material: String?, 
         /**
          * `materialOverrides[]` entry for `material`; `None` when unset or not in the palette.
-         */materialParams: TrideMaterialParams?, indexStart: UInt32, indexCount: UInt32) {
+         */materialParams: TrideMaterialParams?, indexStart: UInt32, indexCount: UInt32, 
+        /**
+         * A datablock mesh's group: gltfio's ubershader key of its primitive; `None` on a
+         * generator's trunk. Additive (R-FFIStability).
+         */materialKey: TrideMaterialKey? = nil, 
+        /**
+         * A datablock mesh's group: its mesh's `topology`; `None` on a generator's trunk. Additive.
+         */topology: String? = nil, 
+        /**
+         * A datablock mesh's group: which attributes its primitive carries in the file — the rows
+         * of the others are padding, never framed from. `None` on a generator's trunk. Additive.
+         */attributes: TrideVertexAttributes? = nil) {
         self.material = material
         self.materialParams = materialParams
         self.indexStart = indexStart
         self.indexCount = indexCount
+        self.materialKey = materialKey
+        self.topology = topology
+        self.attributes = attributes
     }
 }
 
@@ -4631,6 +5270,15 @@ extension TrideGeometryGroup: Equatable, Hashable {
         if lhs.indexCount != rhs.indexCount {
             return false
         }
+        if lhs.materialKey != rhs.materialKey {
+            return false
+        }
+        if lhs.topology != rhs.topology {
+            return false
+        }
+        if lhs.attributes != rhs.attributes {
+            return false
+        }
         return true
     }
 
@@ -4639,6 +5287,9 @@ extension TrideGeometryGroup: Equatable, Hashable {
         hasher.combine(materialParams)
         hasher.combine(indexStart)
         hasher.combine(indexCount)
+        hasher.combine(materialKey)
+        hasher.combine(topology)
+        hasher.combine(attributes)
     }
 }
 
@@ -4653,7 +5304,10 @@ public struct FfiConverterTypeTrideGeometryGroup: FfiConverterRustBuffer {
                 material: FfiConverterOptionString.read(from: &buf), 
                 materialParams: FfiConverterOptionTypeTrideMaterialParams.read(from: &buf), 
                 indexStart: FfiConverterUInt32.read(from: &buf), 
-                indexCount: FfiConverterUInt32.read(from: &buf)
+                indexCount: FfiConverterUInt32.read(from: &buf), 
+                materialKey: FfiConverterOptionTypeTrideMaterialKey.read(from: &buf), 
+                topology: FfiConverterOptionString.read(from: &buf), 
+                attributes: FfiConverterOptionTypeTrideVertexAttributes.read(from: &buf)
         )
     }
 
@@ -4662,6 +5316,9 @@ public struct FfiConverterTypeTrideGeometryGroup: FfiConverterRustBuffer {
         FfiConverterOptionTypeTrideMaterialParams.write(value.materialParams, into: &buf)
         FfiConverterUInt32.write(value.indexStart, into: &buf)
         FfiConverterUInt32.write(value.indexCount, into: &buf)
+        FfiConverterOptionTypeTrideMaterialKey.write(value.materialKey, into: &buf)
+        FfiConverterOptionString.write(value.topology, into: &buf)
+        FfiConverterOptionTypeTrideVertexAttributes.write(value.attributes, into: &buf)
     }
 }
 
@@ -5855,6 +6512,397 @@ public func FfiConverterTypeTrideMaterialGraphValue_lower(_ value: TrideMaterial
 
 
 /**
+ * Filament 1.77.1's `gltfio::MaterialKey` (`MaterialProvider.h:48-106`), field for field: what
+ * the host passes to `UbershaderProvider::createMaterialInstance` — the key gltfio's
+ * `getMaterialKey` computes for the primitive (`alpha_mode`: `opaque` / `mask` / `blend`).
+ */
+public struct TrideMaterialKey {
+    public var doubleSided: Bool
+    public var unlit: Bool
+    public var hasVertexColors: Bool
+    public var hasBaseColorTexture: Bool
+    public var hasNormalTexture: Bool
+    public var hasOcclusionTexture: Bool
+    public var hasEmissiveTexture: Bool
+    public var useSpecularGlossiness: Bool
+    public var alphaMode: String
+    public var enableDiagnostics: Bool
+    public var hasMetallicRoughnessTexture: Bool
+    public var metallicRoughnessUv: UInt8
+    public var baseColorUv: UInt8
+    public var hasClearCoatTexture: Bool
+    public var clearCoatUv: UInt8
+    public var hasClearCoatRoughnessTexture: Bool
+    public var clearCoatRoughnessUv: UInt8
+    public var hasClearCoatNormalTexture: Bool
+    public var clearCoatNormalUv: UInt8
+    public var hasClearCoat: Bool
+    public var hasTransmission: Bool
+    public var hasTextureTransforms: Bool
+    public var emissiveUv: UInt8
+    public var aoUv: UInt8
+    public var normalUv: UInt8
+    public var hasTransmissionTexture: Bool
+    public var transmissionUv: UInt8
+    public var hasSheenColorTexture: Bool
+    public var sheenColorUv: UInt8
+    public var hasSheenRoughnessTexture: Bool
+    public var sheenRoughnessUv: UInt8
+    public var hasVolumeThicknessTexture: Bool
+    public var volumeThicknessUv: UInt8
+    public var hasSheen: Bool
+    public var hasIor: Bool
+    public var hasVolume: Bool
+    public var hasDispersion: Bool
+    public var hasSpecular: Bool
+    public var hasSpecularTexture: Bool
+    public var hasSpecularColorTexture: Bool
+    public var specularTextureUv: UInt8
+    public var specularColorTextureUv: UInt8
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(doubleSided: Bool, unlit: Bool, hasVertexColors: Bool, hasBaseColorTexture: Bool, hasNormalTexture: Bool, hasOcclusionTexture: Bool, hasEmissiveTexture: Bool, useSpecularGlossiness: Bool, alphaMode: String, enableDiagnostics: Bool, hasMetallicRoughnessTexture: Bool, metallicRoughnessUv: UInt8, baseColorUv: UInt8, hasClearCoatTexture: Bool, clearCoatUv: UInt8, hasClearCoatRoughnessTexture: Bool, clearCoatRoughnessUv: UInt8, hasClearCoatNormalTexture: Bool, clearCoatNormalUv: UInt8, hasClearCoat: Bool, hasTransmission: Bool, hasTextureTransforms: Bool, emissiveUv: UInt8, aoUv: UInt8, normalUv: UInt8, hasTransmissionTexture: Bool, transmissionUv: UInt8, hasSheenColorTexture: Bool, sheenColorUv: UInt8, hasSheenRoughnessTexture: Bool, sheenRoughnessUv: UInt8, hasVolumeThicknessTexture: Bool, volumeThicknessUv: UInt8, hasSheen: Bool, hasIor: Bool, hasVolume: Bool, hasDispersion: Bool, hasSpecular: Bool, hasSpecularTexture: Bool, hasSpecularColorTexture: Bool, specularTextureUv: UInt8, specularColorTextureUv: UInt8) {
+        self.doubleSided = doubleSided
+        self.unlit = unlit
+        self.hasVertexColors = hasVertexColors
+        self.hasBaseColorTexture = hasBaseColorTexture
+        self.hasNormalTexture = hasNormalTexture
+        self.hasOcclusionTexture = hasOcclusionTexture
+        self.hasEmissiveTexture = hasEmissiveTexture
+        self.useSpecularGlossiness = useSpecularGlossiness
+        self.alphaMode = alphaMode
+        self.enableDiagnostics = enableDiagnostics
+        self.hasMetallicRoughnessTexture = hasMetallicRoughnessTexture
+        self.metallicRoughnessUv = metallicRoughnessUv
+        self.baseColorUv = baseColorUv
+        self.hasClearCoatTexture = hasClearCoatTexture
+        self.clearCoatUv = clearCoatUv
+        self.hasClearCoatRoughnessTexture = hasClearCoatRoughnessTexture
+        self.clearCoatRoughnessUv = clearCoatRoughnessUv
+        self.hasClearCoatNormalTexture = hasClearCoatNormalTexture
+        self.clearCoatNormalUv = clearCoatNormalUv
+        self.hasClearCoat = hasClearCoat
+        self.hasTransmission = hasTransmission
+        self.hasTextureTransforms = hasTextureTransforms
+        self.emissiveUv = emissiveUv
+        self.aoUv = aoUv
+        self.normalUv = normalUv
+        self.hasTransmissionTexture = hasTransmissionTexture
+        self.transmissionUv = transmissionUv
+        self.hasSheenColorTexture = hasSheenColorTexture
+        self.sheenColorUv = sheenColorUv
+        self.hasSheenRoughnessTexture = hasSheenRoughnessTexture
+        self.sheenRoughnessUv = sheenRoughnessUv
+        self.hasVolumeThicknessTexture = hasVolumeThicknessTexture
+        self.volumeThicknessUv = volumeThicknessUv
+        self.hasSheen = hasSheen
+        self.hasIor = hasIor
+        self.hasVolume = hasVolume
+        self.hasDispersion = hasDispersion
+        self.hasSpecular = hasSpecular
+        self.hasSpecularTexture = hasSpecularTexture
+        self.hasSpecularColorTexture = hasSpecularColorTexture
+        self.specularTextureUv = specularTextureUv
+        self.specularColorTextureUv = specularColorTextureUv
+    }
+}
+
+
+
+extension TrideMaterialKey: Equatable, Hashable {
+    public static func ==(lhs: TrideMaterialKey, rhs: TrideMaterialKey) -> Bool {
+        if lhs.doubleSided != rhs.doubleSided {
+            return false
+        }
+        if lhs.unlit != rhs.unlit {
+            return false
+        }
+        if lhs.hasVertexColors != rhs.hasVertexColors {
+            return false
+        }
+        if lhs.hasBaseColorTexture != rhs.hasBaseColorTexture {
+            return false
+        }
+        if lhs.hasNormalTexture != rhs.hasNormalTexture {
+            return false
+        }
+        if lhs.hasOcclusionTexture != rhs.hasOcclusionTexture {
+            return false
+        }
+        if lhs.hasEmissiveTexture != rhs.hasEmissiveTexture {
+            return false
+        }
+        if lhs.useSpecularGlossiness != rhs.useSpecularGlossiness {
+            return false
+        }
+        if lhs.alphaMode != rhs.alphaMode {
+            return false
+        }
+        if lhs.enableDiagnostics != rhs.enableDiagnostics {
+            return false
+        }
+        if lhs.hasMetallicRoughnessTexture != rhs.hasMetallicRoughnessTexture {
+            return false
+        }
+        if lhs.metallicRoughnessUv != rhs.metallicRoughnessUv {
+            return false
+        }
+        if lhs.baseColorUv != rhs.baseColorUv {
+            return false
+        }
+        if lhs.hasClearCoatTexture != rhs.hasClearCoatTexture {
+            return false
+        }
+        if lhs.clearCoatUv != rhs.clearCoatUv {
+            return false
+        }
+        if lhs.hasClearCoatRoughnessTexture != rhs.hasClearCoatRoughnessTexture {
+            return false
+        }
+        if lhs.clearCoatRoughnessUv != rhs.clearCoatRoughnessUv {
+            return false
+        }
+        if lhs.hasClearCoatNormalTexture != rhs.hasClearCoatNormalTexture {
+            return false
+        }
+        if lhs.clearCoatNormalUv != rhs.clearCoatNormalUv {
+            return false
+        }
+        if lhs.hasClearCoat != rhs.hasClearCoat {
+            return false
+        }
+        if lhs.hasTransmission != rhs.hasTransmission {
+            return false
+        }
+        if lhs.hasTextureTransforms != rhs.hasTextureTransforms {
+            return false
+        }
+        if lhs.emissiveUv != rhs.emissiveUv {
+            return false
+        }
+        if lhs.aoUv != rhs.aoUv {
+            return false
+        }
+        if lhs.normalUv != rhs.normalUv {
+            return false
+        }
+        if lhs.hasTransmissionTexture != rhs.hasTransmissionTexture {
+            return false
+        }
+        if lhs.transmissionUv != rhs.transmissionUv {
+            return false
+        }
+        if lhs.hasSheenColorTexture != rhs.hasSheenColorTexture {
+            return false
+        }
+        if lhs.sheenColorUv != rhs.sheenColorUv {
+            return false
+        }
+        if lhs.hasSheenRoughnessTexture != rhs.hasSheenRoughnessTexture {
+            return false
+        }
+        if lhs.sheenRoughnessUv != rhs.sheenRoughnessUv {
+            return false
+        }
+        if lhs.hasVolumeThicknessTexture != rhs.hasVolumeThicknessTexture {
+            return false
+        }
+        if lhs.volumeThicknessUv != rhs.volumeThicknessUv {
+            return false
+        }
+        if lhs.hasSheen != rhs.hasSheen {
+            return false
+        }
+        if lhs.hasIor != rhs.hasIor {
+            return false
+        }
+        if lhs.hasVolume != rhs.hasVolume {
+            return false
+        }
+        if lhs.hasDispersion != rhs.hasDispersion {
+            return false
+        }
+        if lhs.hasSpecular != rhs.hasSpecular {
+            return false
+        }
+        if lhs.hasSpecularTexture != rhs.hasSpecularTexture {
+            return false
+        }
+        if lhs.hasSpecularColorTexture != rhs.hasSpecularColorTexture {
+            return false
+        }
+        if lhs.specularTextureUv != rhs.specularTextureUv {
+            return false
+        }
+        if lhs.specularColorTextureUv != rhs.specularColorTextureUv {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(doubleSided)
+        hasher.combine(unlit)
+        hasher.combine(hasVertexColors)
+        hasher.combine(hasBaseColorTexture)
+        hasher.combine(hasNormalTexture)
+        hasher.combine(hasOcclusionTexture)
+        hasher.combine(hasEmissiveTexture)
+        hasher.combine(useSpecularGlossiness)
+        hasher.combine(alphaMode)
+        hasher.combine(enableDiagnostics)
+        hasher.combine(hasMetallicRoughnessTexture)
+        hasher.combine(metallicRoughnessUv)
+        hasher.combine(baseColorUv)
+        hasher.combine(hasClearCoatTexture)
+        hasher.combine(clearCoatUv)
+        hasher.combine(hasClearCoatRoughnessTexture)
+        hasher.combine(clearCoatRoughnessUv)
+        hasher.combine(hasClearCoatNormalTexture)
+        hasher.combine(clearCoatNormalUv)
+        hasher.combine(hasClearCoat)
+        hasher.combine(hasTransmission)
+        hasher.combine(hasTextureTransforms)
+        hasher.combine(emissiveUv)
+        hasher.combine(aoUv)
+        hasher.combine(normalUv)
+        hasher.combine(hasTransmissionTexture)
+        hasher.combine(transmissionUv)
+        hasher.combine(hasSheenColorTexture)
+        hasher.combine(sheenColorUv)
+        hasher.combine(hasSheenRoughnessTexture)
+        hasher.combine(sheenRoughnessUv)
+        hasher.combine(hasVolumeThicknessTexture)
+        hasher.combine(volumeThicknessUv)
+        hasher.combine(hasSheen)
+        hasher.combine(hasIor)
+        hasher.combine(hasVolume)
+        hasher.combine(hasDispersion)
+        hasher.combine(hasSpecular)
+        hasher.combine(hasSpecularTexture)
+        hasher.combine(hasSpecularColorTexture)
+        hasher.combine(specularTextureUv)
+        hasher.combine(specularColorTextureUv)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideMaterialKey: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideMaterialKey {
+        return
+            try TrideMaterialKey(
+                doubleSided: FfiConverterBool.read(from: &buf), 
+                unlit: FfiConverterBool.read(from: &buf), 
+                hasVertexColors: FfiConverterBool.read(from: &buf), 
+                hasBaseColorTexture: FfiConverterBool.read(from: &buf), 
+                hasNormalTexture: FfiConverterBool.read(from: &buf), 
+                hasOcclusionTexture: FfiConverterBool.read(from: &buf), 
+                hasEmissiveTexture: FfiConverterBool.read(from: &buf), 
+                useSpecularGlossiness: FfiConverterBool.read(from: &buf), 
+                alphaMode: FfiConverterString.read(from: &buf), 
+                enableDiagnostics: FfiConverterBool.read(from: &buf), 
+                hasMetallicRoughnessTexture: FfiConverterBool.read(from: &buf), 
+                metallicRoughnessUv: FfiConverterUInt8.read(from: &buf), 
+                baseColorUv: FfiConverterUInt8.read(from: &buf), 
+                hasClearCoatTexture: FfiConverterBool.read(from: &buf), 
+                clearCoatUv: FfiConverterUInt8.read(from: &buf), 
+                hasClearCoatRoughnessTexture: FfiConverterBool.read(from: &buf), 
+                clearCoatRoughnessUv: FfiConverterUInt8.read(from: &buf), 
+                hasClearCoatNormalTexture: FfiConverterBool.read(from: &buf), 
+                clearCoatNormalUv: FfiConverterUInt8.read(from: &buf), 
+                hasClearCoat: FfiConverterBool.read(from: &buf), 
+                hasTransmission: FfiConverterBool.read(from: &buf), 
+                hasTextureTransforms: FfiConverterBool.read(from: &buf), 
+                emissiveUv: FfiConverterUInt8.read(from: &buf), 
+                aoUv: FfiConverterUInt8.read(from: &buf), 
+                normalUv: FfiConverterUInt8.read(from: &buf), 
+                hasTransmissionTexture: FfiConverterBool.read(from: &buf), 
+                transmissionUv: FfiConverterUInt8.read(from: &buf), 
+                hasSheenColorTexture: FfiConverterBool.read(from: &buf), 
+                sheenColorUv: FfiConverterUInt8.read(from: &buf), 
+                hasSheenRoughnessTexture: FfiConverterBool.read(from: &buf), 
+                sheenRoughnessUv: FfiConverterUInt8.read(from: &buf), 
+                hasVolumeThicknessTexture: FfiConverterBool.read(from: &buf), 
+                volumeThicknessUv: FfiConverterUInt8.read(from: &buf), 
+                hasSheen: FfiConverterBool.read(from: &buf), 
+                hasIor: FfiConverterBool.read(from: &buf), 
+                hasVolume: FfiConverterBool.read(from: &buf), 
+                hasDispersion: FfiConverterBool.read(from: &buf), 
+                hasSpecular: FfiConverterBool.read(from: &buf), 
+                hasSpecularTexture: FfiConverterBool.read(from: &buf), 
+                hasSpecularColorTexture: FfiConverterBool.read(from: &buf), 
+                specularTextureUv: FfiConverterUInt8.read(from: &buf), 
+                specularColorTextureUv: FfiConverterUInt8.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideMaterialKey, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.doubleSided, into: &buf)
+        FfiConverterBool.write(value.unlit, into: &buf)
+        FfiConverterBool.write(value.hasVertexColors, into: &buf)
+        FfiConverterBool.write(value.hasBaseColorTexture, into: &buf)
+        FfiConverterBool.write(value.hasNormalTexture, into: &buf)
+        FfiConverterBool.write(value.hasOcclusionTexture, into: &buf)
+        FfiConverterBool.write(value.hasEmissiveTexture, into: &buf)
+        FfiConverterBool.write(value.useSpecularGlossiness, into: &buf)
+        FfiConverterString.write(value.alphaMode, into: &buf)
+        FfiConverterBool.write(value.enableDiagnostics, into: &buf)
+        FfiConverterBool.write(value.hasMetallicRoughnessTexture, into: &buf)
+        FfiConverterUInt8.write(value.metallicRoughnessUv, into: &buf)
+        FfiConverterUInt8.write(value.baseColorUv, into: &buf)
+        FfiConverterBool.write(value.hasClearCoatTexture, into: &buf)
+        FfiConverterUInt8.write(value.clearCoatUv, into: &buf)
+        FfiConverterBool.write(value.hasClearCoatRoughnessTexture, into: &buf)
+        FfiConverterUInt8.write(value.clearCoatRoughnessUv, into: &buf)
+        FfiConverterBool.write(value.hasClearCoatNormalTexture, into: &buf)
+        FfiConverterUInt8.write(value.clearCoatNormalUv, into: &buf)
+        FfiConverterBool.write(value.hasClearCoat, into: &buf)
+        FfiConverterBool.write(value.hasTransmission, into: &buf)
+        FfiConverterBool.write(value.hasTextureTransforms, into: &buf)
+        FfiConverterUInt8.write(value.emissiveUv, into: &buf)
+        FfiConverterUInt8.write(value.aoUv, into: &buf)
+        FfiConverterUInt8.write(value.normalUv, into: &buf)
+        FfiConverterBool.write(value.hasTransmissionTexture, into: &buf)
+        FfiConverterUInt8.write(value.transmissionUv, into: &buf)
+        FfiConverterBool.write(value.hasSheenColorTexture, into: &buf)
+        FfiConverterUInt8.write(value.sheenColorUv, into: &buf)
+        FfiConverterBool.write(value.hasSheenRoughnessTexture, into: &buf)
+        FfiConverterUInt8.write(value.sheenRoughnessUv, into: &buf)
+        FfiConverterBool.write(value.hasVolumeThicknessTexture, into: &buf)
+        FfiConverterUInt8.write(value.volumeThicknessUv, into: &buf)
+        FfiConverterBool.write(value.hasSheen, into: &buf)
+        FfiConverterBool.write(value.hasIor, into: &buf)
+        FfiConverterBool.write(value.hasVolume, into: &buf)
+        FfiConverterBool.write(value.hasDispersion, into: &buf)
+        FfiConverterBool.write(value.hasSpecular, into: &buf)
+        FfiConverterBool.write(value.hasSpecularTexture, into: &buf)
+        FfiConverterBool.write(value.hasSpecularColorTexture, into: &buf)
+        FfiConverterUInt8.write(value.specularTextureUv, into: &buf)
+        FfiConverterUInt8.write(value.specularColorTextureUv, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideMaterialKey_lift(_ buf: RustBuffer) throws -> TrideMaterialKey {
+    return try FfiConverterTypeTrideMaterialKey.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideMaterialKey_lower(_ value: TrideMaterialKey) -> RustBuffer {
+    return FfiConverterTypeTrideMaterialKey.lower(value)
+}
+
+
+/**
  * A material package read without loading it: Filament's `MATERIAL_VERSION` and
  * the backends it carries (`"opengl"`, `"essl1"`, `"vulkan"`, `"metal"`, `"webgpu"`).
  */
@@ -5969,8 +7017,8 @@ public struct TrideMaterialParams {
      */
     public var alphaCutoff: Double?
     /**
-     * `KHR_materials_diffuse_transmission` factor: `> 0` (or a rim) selects the
-     * thin-surface material family on the host; `None` = 0.
+     * `KHR_materials_diffuse_transmission` factor as the thin family draws it; `None` = 0 (also
+     * when the core does not draw it: unlit, under glass, its channel off).
      */
     public var diffuseTransmission: Double?
     /**
@@ -5983,10 +7031,15 @@ public struct TrideMaterialParams {
      */
     public var diffuseTransmissionColorTexture: TrideTextureRef?
     /**
-     * Silhouette rim colour (linear RGB, length 3) and exponent; `None` = no rim.
+     * Silhouette rim colour (linear RGB, length 3) and exponent; `None` = no rim drawn.
      */
     public var rimColor: [Double]?
     public var rimPower: Double?
+    /**
+     * The thin-surface family (`tride-generated-thin*`) draws it — the core's rule
+     * (`material_graph::built_in_thin`); the host keeps no copy.
+     */
+    public var thin: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -6014,8 +7067,8 @@ public struct TrideMaterialParams {
          * glTF `alphaCutoff` for `"mask"`; `None` = the glTF default 0.5.
          */alphaCutoff: Double?, 
         /**
-         * `KHR_materials_diffuse_transmission` factor: `> 0` (or a rim) selects the
-         * thin-surface material family on the host; `None` = 0.
+         * `KHR_materials_diffuse_transmission` factor as the thin family draws it; `None` = 0 (also
+         * when the core does not draw it: unlit, under glass, its channel off).
          */diffuseTransmission: Double?, 
         /**
          * Its colour, linear RGB length 3; `None` = white.
@@ -6025,8 +7078,12 @@ public struct TrideMaterialParams {
          * `None` = the factor alone.
          */diffuseTransmissionColorTexture: TrideTextureRef?, 
         /**
-         * Silhouette rim colour (linear RGB, length 3) and exponent; `None` = no rim.
-         */rimColor: [Double]?, rimPower: Double?) {
+         * Silhouette rim colour (linear RGB, length 3) and exponent; `None` = no rim drawn.
+         */rimColor: [Double]?, rimPower: Double?, 
+        /**
+         * The thin-surface family (`tride-generated-thin*`) draws it — the core's rule
+         * (`material_graph::built_in_thin`); the host keeps no copy.
+         */thin: Bool = false) {
         self.baseColor = baseColor
         self.metallic = metallic
         self.roughness = roughness
@@ -6040,6 +7097,7 @@ public struct TrideMaterialParams {
         self.diffuseTransmissionColorTexture = diffuseTransmissionColorTexture
         self.rimColor = rimColor
         self.rimPower = rimPower
+        self.thin = thin
     }
 }
 
@@ -6086,6 +7144,9 @@ extension TrideMaterialParams: Equatable, Hashable {
         if lhs.rimPower != rhs.rimPower {
             return false
         }
+        if lhs.thin != rhs.thin {
+            return false
+        }
         return true
     }
 
@@ -6103,6 +7164,7 @@ extension TrideMaterialParams: Equatable, Hashable {
         hasher.combine(diffuseTransmissionColorTexture)
         hasher.combine(rimColor)
         hasher.combine(rimPower)
+        hasher.combine(thin)
     }
 }
 
@@ -6126,7 +7188,8 @@ public struct FfiConverterTypeTrideMaterialParams: FfiConverterRustBuffer {
                 diffuseTransmissionColor: FfiConverterOptionSequenceDouble.read(from: &buf), 
                 diffuseTransmissionColorTexture: FfiConverterOptionTypeTrideTextureRef.read(from: &buf), 
                 rimColor: FfiConverterOptionSequenceDouble.read(from: &buf), 
-                rimPower: FfiConverterOptionDouble.read(from: &buf)
+                rimPower: FfiConverterOptionDouble.read(from: &buf), 
+                thin: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -6144,6 +7207,7 @@ public struct FfiConverterTypeTrideMaterialParams: FfiConverterRustBuffer {
         FfiConverterOptionTypeTrideTextureRef.write(value.diffuseTransmissionColorTexture, into: &buf)
         FfiConverterOptionSequenceDouble.write(value.rimColor, into: &buf)
         FfiConverterOptionDouble.write(value.rimPower, into: &buf)
+        FfiConverterBool.write(value.thin, into: &buf)
     }
 }
 
@@ -6382,6 +7446,84 @@ public func FfiConverterTypeTrideModuleFrame_lower(_ value: TrideModuleFrame) ->
 
 
 /**
+ * One morph target's deltas: little-endian `f32` `xyz` per vertex (tangents move no `w`); a
+ * stream no target of the datablock moves is empty.
+ */
+public struct TrideMorphTarget {
+    public var positions: Data
+    public var normals: Data
+    public var tangents: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(positions: Data, normals: Data, tangents: Data) {
+        self.positions = positions
+        self.normals = normals
+        self.tangents = tangents
+    }
+}
+
+
+
+extension TrideMorphTarget: Equatable, Hashable {
+    public static func ==(lhs: TrideMorphTarget, rhs: TrideMorphTarget) -> Bool {
+        if lhs.positions != rhs.positions {
+            return false
+        }
+        if lhs.normals != rhs.normals {
+            return false
+        }
+        if lhs.tangents != rhs.tangents {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(positions)
+        hasher.combine(normals)
+        hasher.combine(tangents)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideMorphTarget: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideMorphTarget {
+        return
+            try TrideMorphTarget(
+                positions: FfiConverterData.read(from: &buf), 
+                normals: FfiConverterData.read(from: &buf), 
+                tangents: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideMorphTarget, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.positions, into: &buf)
+        FfiConverterData.write(value.normals, into: &buf)
+        FfiConverterData.write(value.tangents, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideMorphTarget_lift(_ buf: RustBuffer) throws -> TrideMorphTarget {
+    return try FfiConverterTypeTrideMorphTarget.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideMorphTarget_lower(_ value: TrideMorphTarget) -> RustBuffer {
+    return FfiConverterTypeTrideMorphTarget.lower(value)
+}
+
+
+/**
  * MSAA options.
  */
 public struct TrideMsaaOptions {
@@ -6548,123 +7690,6 @@ public func FfiConverterTypeTrideMutation_lift(_ buf: RustBuffer) throws -> Trid
 #endif
 public func FfiConverterTypeTrideMutation_lower(_ value: TrideMutation) -> RustBuffer {
     return FfiConverterTypeTrideMutation.lower(value)
-}
-
-
-/**
- * Node metadata entry for `/node/{id}` pointer resolution (Wave 6).
- * Bridges build a `id → gltf_index` lookup table at load-time so
- * authored-timeline mutations can be dispatched to Filament entities.
- */
-public struct TrideNodeMetaEntry {
-    /**
-     * Manifest node ID — the stable identifier in `/node/{id}` pointers.
-     */
-    public var id: String
-    /**
-     * Zero-based index into the glTF `nodes[]` array.
-     */
-    public var gltfIndex: UInt32
-    /**
-     * The node's own authored visibility (`SceneNode.visible`); `true` for carriers and
-     * for ids the manifest's node list does not carry. What is drawn is the EFFECTIVE
-     * visibility — this AND every ancestor's — hosts compose it through [`Self::parent_id`].
-     */
-    public var visible: Bool
-    /**
-     * Manifest id of the parent node (`Manifest.nodes[].children`); `None` at the root and
-     * for carriers.
-     */
-    public var parentId: String?
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(
-        /**
-         * Manifest node ID — the stable identifier in `/node/{id}` pointers.
-         */id: String, 
-        /**
-         * Zero-based index into the glTF `nodes[]` array.
-         */gltfIndex: UInt32, 
-        /**
-         * The node's own authored visibility (`SceneNode.visible`); `true` for carriers and
-         * for ids the manifest's node list does not carry. What is drawn is the EFFECTIVE
-         * visibility — this AND every ancestor's — hosts compose it through [`Self::parent_id`].
-         */visible: Bool, 
-        /**
-         * Manifest id of the parent node (`Manifest.nodes[].children`); `None` at the root and
-         * for carriers.
-         */parentId: String?) {
-        self.id = id
-        self.gltfIndex = gltfIndex
-        self.visible = visible
-        self.parentId = parentId
-    }
-}
-
-
-
-extension TrideNodeMetaEntry: Equatable, Hashable {
-    public static func ==(lhs: TrideNodeMetaEntry, rhs: TrideNodeMetaEntry) -> Bool {
-        if lhs.id != rhs.id {
-            return false
-        }
-        if lhs.gltfIndex != rhs.gltfIndex {
-            return false
-        }
-        if lhs.visible != rhs.visible {
-            return false
-        }
-        if lhs.parentId != rhs.parentId {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-        hasher.combine(gltfIndex)
-        hasher.combine(visible)
-        hasher.combine(parentId)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeTrideNodeMetaEntry: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideNodeMetaEntry {
-        return
-            try TrideNodeMetaEntry(
-                id: FfiConverterString.read(from: &buf), 
-                gltfIndex: FfiConverterUInt32.read(from: &buf), 
-                visible: FfiConverterBool.read(from: &buf), 
-                parentId: FfiConverterOptionString.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: TrideNodeMetaEntry, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.id, into: &buf)
-        FfiConverterUInt32.write(value.gltfIndex, into: &buf)
-        FfiConverterBool.write(value.visible, into: &buf)
-        FfiConverterOptionString.write(value.parentId, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeTrideNodeMetaEntry_lift(_ buf: RustBuffer) throws -> TrideNodeMetaEntry {
-    return try FfiConverterTypeTrideNodeMetaEntry.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeTrideNodeMetaEntry_lower(_ value: TrideNodeMetaEntry) -> RustBuffer {
-    return FfiConverterTypeTrideNodeMetaEntry.lower(value)
 }
 
 
@@ -7233,6 +8258,1174 @@ public func FfiConverterTypeTridePulseTable_lower(_ value: TridePulseTable) -> R
 
 
 /**
+ * One camera of [`TrideSceneRecord`]: parameters as [`TrideCameraDescriptor`], its parent and
+ * focus rows, the pose as a quaternion from the core (its rotation order composed).
+ */
+public struct TrideRecordCamera {
+    public var id: String
+    public var kind: String
+    public var yfov: Double?
+    public var aspectRatio: Double?
+    public var xmag: Double?
+    public var ymag: Double?
+    public var znear: Double
+    public var zfar: Double?
+    public var focusDistance: Double?
+    public var aperture: Double?
+    public var focusTarget: UInt32?
+    public var parent: UInt32?
+    public var translation: [Double]
+    public var rotation: [Double]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, kind: String, yfov: Double?, aspectRatio: Double?, xmag: Double?, ymag: Double?, znear: Double, zfar: Double?, focusDistance: Double?, aperture: Double?, focusTarget: UInt32?, parent: UInt32?, translation: [Double], rotation: [Double]) {
+        self.id = id
+        self.kind = kind
+        self.yfov = yfov
+        self.aspectRatio = aspectRatio
+        self.xmag = xmag
+        self.ymag = ymag
+        self.znear = znear
+        self.zfar = zfar
+        self.focusDistance = focusDistance
+        self.aperture = aperture
+        self.focusTarget = focusTarget
+        self.parent = parent
+        self.translation = translation
+        self.rotation = rotation
+    }
+}
+
+
+
+extension TrideRecordCamera: Equatable, Hashable {
+    public static func ==(lhs: TrideRecordCamera, rhs: TrideRecordCamera) -> Bool {
+        if lhs.id != rhs.id {
+            return false
+        }
+        if lhs.kind != rhs.kind {
+            return false
+        }
+        if lhs.yfov != rhs.yfov {
+            return false
+        }
+        if lhs.aspectRatio != rhs.aspectRatio {
+            return false
+        }
+        if lhs.xmag != rhs.xmag {
+            return false
+        }
+        if lhs.ymag != rhs.ymag {
+            return false
+        }
+        if lhs.znear != rhs.znear {
+            return false
+        }
+        if lhs.zfar != rhs.zfar {
+            return false
+        }
+        if lhs.focusDistance != rhs.focusDistance {
+            return false
+        }
+        if lhs.aperture != rhs.aperture {
+            return false
+        }
+        if lhs.focusTarget != rhs.focusTarget {
+            return false
+        }
+        if lhs.parent != rhs.parent {
+            return false
+        }
+        if lhs.translation != rhs.translation {
+            return false
+        }
+        if lhs.rotation != rhs.rotation {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(kind)
+        hasher.combine(yfov)
+        hasher.combine(aspectRatio)
+        hasher.combine(xmag)
+        hasher.combine(ymag)
+        hasher.combine(znear)
+        hasher.combine(zfar)
+        hasher.combine(focusDistance)
+        hasher.combine(aperture)
+        hasher.combine(focusTarget)
+        hasher.combine(parent)
+        hasher.combine(translation)
+        hasher.combine(rotation)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideRecordCamera: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideRecordCamera {
+        return
+            try TrideRecordCamera(
+                id: FfiConverterString.read(from: &buf), 
+                kind: FfiConverterString.read(from: &buf), 
+                yfov: FfiConverterOptionDouble.read(from: &buf), 
+                aspectRatio: FfiConverterOptionDouble.read(from: &buf), 
+                xmag: FfiConverterOptionDouble.read(from: &buf), 
+                ymag: FfiConverterOptionDouble.read(from: &buf), 
+                znear: FfiConverterDouble.read(from: &buf), 
+                zfar: FfiConverterOptionDouble.read(from: &buf), 
+                focusDistance: FfiConverterOptionDouble.read(from: &buf), 
+                aperture: FfiConverterOptionDouble.read(from: &buf), 
+                focusTarget: FfiConverterOptionUInt32.read(from: &buf), 
+                parent: FfiConverterOptionUInt32.read(from: &buf), 
+                translation: FfiConverterSequenceDouble.read(from: &buf), 
+                rotation: FfiConverterSequenceDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideRecordCamera, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterOptionDouble.write(value.yfov, into: &buf)
+        FfiConverterOptionDouble.write(value.aspectRatio, into: &buf)
+        FfiConverterOptionDouble.write(value.xmag, into: &buf)
+        FfiConverterOptionDouble.write(value.ymag, into: &buf)
+        FfiConverterDouble.write(value.znear, into: &buf)
+        FfiConverterOptionDouble.write(value.zfar, into: &buf)
+        FfiConverterOptionDouble.write(value.focusDistance, into: &buf)
+        FfiConverterOptionDouble.write(value.aperture, into: &buf)
+        FfiConverterOptionUInt32.write(value.focusTarget, into: &buf)
+        FfiConverterOptionUInt32.write(value.parent, into: &buf)
+        FfiConverterSequenceDouble.write(value.translation, into: &buf)
+        FfiConverterSequenceDouble.write(value.rotation, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideRecordCamera_lift(_ buf: RustBuffer) throws -> TrideRecordCamera {
+    return try FfiConverterTypeTrideRecordCamera.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideRecordCamera_lower(_ value: TrideRecordCamera) -> RustBuffer {
+    return FfiConverterTypeTrideRecordCamera.lower(value)
+}
+
+
+/**
+ * A family a material draws through its generated material; the package `None` when the scene
+ * keeps none there (`problem` says why, or no object draws it there). Uniforms and pictures:
+ * [`TrideScene::material_graph`].
+ */
+public struct TrideRecordGraph {
+    public var family: String
+    public var packageUri: String?
+    public var hash: String?
+    public var name: String?
+    public var problem: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(family: String, packageUri: String?, hash: String?, name: String?, problem: String?) {
+        self.family = family
+        self.packageUri = packageUri
+        self.hash = hash
+        self.name = name
+        self.problem = problem
+    }
+}
+
+
+
+extension TrideRecordGraph: Equatable, Hashable {
+    public static func ==(lhs: TrideRecordGraph, rhs: TrideRecordGraph) -> Bool {
+        if lhs.family != rhs.family {
+            return false
+        }
+        if lhs.packageUri != rhs.packageUri {
+            return false
+        }
+        if lhs.hash != rhs.hash {
+            return false
+        }
+        if lhs.name != rhs.name {
+            return false
+        }
+        if lhs.problem != rhs.problem {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(family)
+        hasher.combine(packageUri)
+        hasher.combine(hash)
+        hasher.combine(name)
+        hasher.combine(problem)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideRecordGraph: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideRecordGraph {
+        return
+            try TrideRecordGraph(
+                family: FfiConverterString.read(from: &buf), 
+                packageUri: FfiConverterOptionString.read(from: &buf), 
+                hash: FfiConverterOptionString.read(from: &buf), 
+                name: FfiConverterOptionString.read(from: &buf), 
+                problem: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideRecordGraph, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.family, into: &buf)
+        FfiConverterOptionString.write(value.packageUri, into: &buf)
+        FfiConverterOptionString.write(value.hash, into: &buf)
+        FfiConverterOptionString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.problem, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideRecordGraph_lift(_ buf: RustBuffer) throws -> TrideRecordGraph {
+    return try FfiConverterTypeTrideRecordGraph.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideRecordGraph_lower(_ value: TrideRecordGraph) -> RustBuffer {
+    return FfiConverterTypeTrideRecordGraph.lower(value)
+}
+
+
+/**
+ * One picture of the archive.
+ */
+public struct TrideRecordImage {
+    public var uri: String
+    public var mimeType: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(uri: String, mimeType: String?) {
+        self.uri = uri
+        self.mimeType = mimeType
+    }
+}
+
+
+
+extension TrideRecordImage: Equatable, Hashable {
+    public static func ==(lhs: TrideRecordImage, rhs: TrideRecordImage) -> Bool {
+        if lhs.uri != rhs.uri {
+            return false
+        }
+        if lhs.mimeType != rhs.mimeType {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(uri)
+        hasher.combine(mimeType)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideRecordImage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideRecordImage {
+        return
+            try TrideRecordImage(
+                uri: FfiConverterString.read(from: &buf), 
+                mimeType: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideRecordImage, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.uri, into: &buf)
+        FfiConverterOptionString.write(value.mimeType, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideRecordImage_lift(_ buf: RustBuffer) throws -> TrideRecordImage {
+    return try FfiConverterTypeTrideRecordImage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideRecordImage_lower(_ value: TrideRecordImage) -> RustBuffer {
+    return FfiConverterTypeTrideRecordImage.lower(value)
+}
+
+
+/**
+ * One light of [`TrideSceneRecord`]: parameters as [`TrideLightDescriptor`], its parent row,
+ * the pose as a quaternion from the core.
+ */
+public struct TrideRecordLight {
+    public var id: String
+    public var lightType: String
+    public var color: [Double]
+    public var intensity: Double
+    public var range: Double?
+    public var innerConeAngle: Double?
+    public var outerConeAngle: Double?
+    public var castShadows: Bool?
+    public var parent: UInt32?
+    public var translation: [Double]
+    public var rotation: [Double]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, lightType: String, color: [Double], intensity: Double, range: Double?, innerConeAngle: Double?, outerConeAngle: Double?, castShadows: Bool?, parent: UInt32?, translation: [Double], rotation: [Double]) {
+        self.id = id
+        self.lightType = lightType
+        self.color = color
+        self.intensity = intensity
+        self.range = range
+        self.innerConeAngle = innerConeAngle
+        self.outerConeAngle = outerConeAngle
+        self.castShadows = castShadows
+        self.parent = parent
+        self.translation = translation
+        self.rotation = rotation
+    }
+}
+
+
+
+extension TrideRecordLight: Equatable, Hashable {
+    public static func ==(lhs: TrideRecordLight, rhs: TrideRecordLight) -> Bool {
+        if lhs.id != rhs.id {
+            return false
+        }
+        if lhs.lightType != rhs.lightType {
+            return false
+        }
+        if lhs.color != rhs.color {
+            return false
+        }
+        if lhs.intensity != rhs.intensity {
+            return false
+        }
+        if lhs.range != rhs.range {
+            return false
+        }
+        if lhs.innerConeAngle != rhs.innerConeAngle {
+            return false
+        }
+        if lhs.outerConeAngle != rhs.outerConeAngle {
+            return false
+        }
+        if lhs.castShadows != rhs.castShadows {
+            return false
+        }
+        if lhs.parent != rhs.parent {
+            return false
+        }
+        if lhs.translation != rhs.translation {
+            return false
+        }
+        if lhs.rotation != rhs.rotation {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(lightType)
+        hasher.combine(color)
+        hasher.combine(intensity)
+        hasher.combine(range)
+        hasher.combine(innerConeAngle)
+        hasher.combine(outerConeAngle)
+        hasher.combine(castShadows)
+        hasher.combine(parent)
+        hasher.combine(translation)
+        hasher.combine(rotation)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideRecordLight: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideRecordLight {
+        return
+            try TrideRecordLight(
+                id: FfiConverterString.read(from: &buf), 
+                lightType: FfiConverterString.read(from: &buf), 
+                color: FfiConverterSequenceDouble.read(from: &buf), 
+                intensity: FfiConverterDouble.read(from: &buf), 
+                range: FfiConverterOptionDouble.read(from: &buf), 
+                innerConeAngle: FfiConverterOptionDouble.read(from: &buf), 
+                outerConeAngle: FfiConverterOptionDouble.read(from: &buf), 
+                castShadows: FfiConverterOptionBool.read(from: &buf), 
+                parent: FfiConverterOptionUInt32.read(from: &buf), 
+                translation: FfiConverterSequenceDouble.read(from: &buf), 
+                rotation: FfiConverterSequenceDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideRecordLight, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.lightType, into: &buf)
+        FfiConverterSequenceDouble.write(value.color, into: &buf)
+        FfiConverterDouble.write(value.intensity, into: &buf)
+        FfiConverterOptionDouble.write(value.range, into: &buf)
+        FfiConverterOptionDouble.write(value.innerConeAngle, into: &buf)
+        FfiConverterOptionDouble.write(value.outerConeAngle, into: &buf)
+        FfiConverterOptionBool.write(value.castShadows, into: &buf)
+        FfiConverterOptionUInt32.write(value.parent, into: &buf)
+        FfiConverterSequenceDouble.write(value.translation, into: &buf)
+        FfiConverterSequenceDouble.write(value.rotation, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideRecordLight_lift(_ buf: RustBuffer) throws -> TrideRecordLight {
+    return try FfiConverterTypeTrideRecordLight.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideRecordLight_lower(_ value: TrideRecordLight) -> RustBuffer {
+    return FfiConverterTypeTrideRecordLight.lower(value)
+}
+
+
+/**
+ * One glTF map slot of a standard material.
+ */
+public struct TrideRecordMap {
+    /**
+     * `baseColor`, `metallicRoughness`, `normal`, `occlusion`, `emissive`,
+     * `diffuseTransmissionColor`.
+     */
+    public var slot: String
+    /**
+     * The border already applied to the wrap.
+     */
+    public var texture: TrideTextureRef
+    /**
+     * The picture is sRGB-encoded, else linear.
+     */
+    public var srgb: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * `baseColor`, `metallicRoughness`, `normal`, `occlusion`, `emissive`,
+         * `diffuseTransmissionColor`.
+         */slot: String, 
+        /**
+         * The border already applied to the wrap.
+         */texture: TrideTextureRef, 
+        /**
+         * The picture is sRGB-encoded, else linear.
+         */srgb: Bool) {
+        self.slot = slot
+        self.texture = texture
+        self.srgb = srgb
+    }
+}
+
+
+
+extension TrideRecordMap: Equatable, Hashable {
+    public static func ==(lhs: TrideRecordMap, rhs: TrideRecordMap) -> Bool {
+        if lhs.slot != rhs.slot {
+            return false
+        }
+        if lhs.texture != rhs.texture {
+            return false
+        }
+        if lhs.srgb != rhs.srgb {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(slot)
+        hasher.combine(texture)
+        hasher.combine(srgb)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideRecordMap: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideRecordMap {
+        return
+            try TrideRecordMap(
+                slot: FfiConverterString.read(from: &buf), 
+                texture: FfiConverterTypeTrideTextureRef.read(from: &buf), 
+                srgb: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideRecordMap, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.slot, into: &buf)
+        FfiConverterTypeTrideTextureRef.write(value.texture, into: &buf)
+        FfiConverterBool.write(value.srgb, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideRecordMap_lift(_ buf: RustBuffer) throws -> TrideRecordMap {
+    return try FfiConverterTypeTrideRecordMap.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideRecordMap_lower(_ value: TrideRecordMap) -> RustBuffer {
+    return FfiConverterTypeTrideRecordMap.lower(value)
+}
+
+
+/**
+ * One palette material of [`TrideSceneRecord`]: how the core draws it per family
+ * (`"standard" | "graph"` on `mesh`, `"built_in" | "graph"` on `generated` / `instanced`).
+ */
+public struct TrideRecordMaterial {
+    public var slug: String
+    public var mesh: String
+    public var generated: String
+    public var instanced: String
+    /**
+     * When `mesh` is `"standard"`.
+     */
+    public var standard: TrideRecordStandard?
+    /**
+     * When `generated` or `instanced` is `"built_in"`.
+     */
+    public var builtIn: TrideMaterialParams?
+    /**
+     * One per family drawn `"graph"`, family order.
+     */
+    public var graphs: [TrideRecordGraph]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(slug: String, mesh: String, generated: String, instanced: String, 
+        /**
+         * When `mesh` is `"standard"`.
+         */standard: TrideRecordStandard?, 
+        /**
+         * When `generated` or `instanced` is `"built_in"`.
+         */builtIn: TrideMaterialParams?, 
+        /**
+         * One per family drawn `"graph"`, family order.
+         */graphs: [TrideRecordGraph]) {
+        self.slug = slug
+        self.mesh = mesh
+        self.generated = generated
+        self.instanced = instanced
+        self.standard = standard
+        self.builtIn = builtIn
+        self.graphs = graphs
+    }
+}
+
+
+
+extension TrideRecordMaterial: Equatable, Hashable {
+    public static func ==(lhs: TrideRecordMaterial, rhs: TrideRecordMaterial) -> Bool {
+        if lhs.slug != rhs.slug {
+            return false
+        }
+        if lhs.mesh != rhs.mesh {
+            return false
+        }
+        if lhs.generated != rhs.generated {
+            return false
+        }
+        if lhs.instanced != rhs.instanced {
+            return false
+        }
+        if lhs.standard != rhs.standard {
+            return false
+        }
+        if lhs.builtIn != rhs.builtIn {
+            return false
+        }
+        if lhs.graphs != rhs.graphs {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(slug)
+        hasher.combine(mesh)
+        hasher.combine(generated)
+        hasher.combine(instanced)
+        hasher.combine(standard)
+        hasher.combine(builtIn)
+        hasher.combine(graphs)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideRecordMaterial: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideRecordMaterial {
+        return
+            try TrideRecordMaterial(
+                slug: FfiConverterString.read(from: &buf), 
+                mesh: FfiConverterString.read(from: &buf), 
+                generated: FfiConverterString.read(from: &buf), 
+                instanced: FfiConverterString.read(from: &buf), 
+                standard: FfiConverterOptionTypeTrideRecordStandard.read(from: &buf), 
+                builtIn: FfiConverterOptionTypeTrideMaterialParams.read(from: &buf), 
+                graphs: FfiConverterSequenceTypeTrideRecordGraph.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideRecordMaterial, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.slug, into: &buf)
+        FfiConverterString.write(value.mesh, into: &buf)
+        FfiConverterString.write(value.generated, into: &buf)
+        FfiConverterString.write(value.instanced, into: &buf)
+        FfiConverterOptionTypeTrideRecordStandard.write(value.standard, into: &buf)
+        FfiConverterOptionTypeTrideMaterialParams.write(value.builtIn, into: &buf)
+        FfiConverterSequenceTypeTrideRecordGraph.write(value.graphs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideRecordMaterial_lift(_ buf: RustBuffer) throws -> TrideRecordMaterial {
+    return try FfiConverterTypeTrideRecordMaterial.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideRecordMaterial_lower(_ value: TrideRecordMaterial) -> RustBuffer {
+    return FfiConverterTypeTrideRecordMaterial.lower(value)
+}
+
+
+/**
+ * One node row of [`TrideSceneRecord`].
+ */
+public struct TrideRecordNode {
+    public var uid: String
+    /**
+     * For display and logs only — never an address.
+     */
+    public var name: String
+    public var kind: String
+    /**
+     * The parent's row; `None` at a root.
+     */
+    public var parent: UInt32?
+    /**
+     * The children's rows, manifest order.
+     */
+    public var children: [UInt32]
+    /**
+     * Rest pose: `[x, y, z]`, quaternion `[x, y, z, w]`, `[sx, sy, sz]`.
+     */
+    public var translation: [Double]
+    public var rotation: [Double]
+    public var scale: [Double]
+    /**
+     * Visibility to the renderer: its own flag and every ancestor's. Per tick:
+     * `/node/{uid}/drawVisible` after [`TrideScene::set_draw_visibility`].
+     */
+    public var visible: Bool
+    /**
+     * The datablock it draws (uid, for [`TrideScene::datablock_mesh`]).
+     */
+    public var datablock: String?
+    /**
+     * Its skin, by position in [`TrideSceneRecord::skins`].
+     */
+    public var skin: UInt32?
+    /**
+     * Morph weights at rest.
+     */
+    public var weights: [Double]
+    /**
+     * The generator it hosts (slug).
+     */
+    public var generator: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(uid: String, 
+        /**
+         * For display and logs only — never an address.
+         */name: String, kind: String, 
+        /**
+         * The parent's row; `None` at a root.
+         */parent: UInt32?, 
+        /**
+         * The children's rows, manifest order.
+         */children: [UInt32], 
+        /**
+         * Rest pose: `[x, y, z]`, quaternion `[x, y, z, w]`, `[sx, sy, sz]`.
+         */translation: [Double], rotation: [Double], scale: [Double], 
+        /**
+         * Visibility to the renderer: its own flag and every ancestor's. Per tick:
+         * `/node/{uid}/drawVisible` after [`TrideScene::set_draw_visibility`].
+         */visible: Bool, 
+        /**
+         * The datablock it draws (uid, for [`TrideScene::datablock_mesh`]).
+         */datablock: String?, 
+        /**
+         * Its skin, by position in [`TrideSceneRecord::skins`].
+         */skin: UInt32?, 
+        /**
+         * Morph weights at rest.
+         */weights: [Double], 
+        /**
+         * The generator it hosts (slug).
+         */generator: String?) {
+        self.uid = uid
+        self.name = name
+        self.kind = kind
+        self.parent = parent
+        self.children = children
+        self.translation = translation
+        self.rotation = rotation
+        self.scale = scale
+        self.visible = visible
+        self.datablock = datablock
+        self.skin = skin
+        self.weights = weights
+        self.generator = generator
+    }
+}
+
+
+
+extension TrideRecordNode: Equatable, Hashable {
+    public static func ==(lhs: TrideRecordNode, rhs: TrideRecordNode) -> Bool {
+        if lhs.uid != rhs.uid {
+            return false
+        }
+        if lhs.name != rhs.name {
+            return false
+        }
+        if lhs.kind != rhs.kind {
+            return false
+        }
+        if lhs.parent != rhs.parent {
+            return false
+        }
+        if lhs.children != rhs.children {
+            return false
+        }
+        if lhs.translation != rhs.translation {
+            return false
+        }
+        if lhs.rotation != rhs.rotation {
+            return false
+        }
+        if lhs.scale != rhs.scale {
+            return false
+        }
+        if lhs.visible != rhs.visible {
+            return false
+        }
+        if lhs.datablock != rhs.datablock {
+            return false
+        }
+        if lhs.skin != rhs.skin {
+            return false
+        }
+        if lhs.weights != rhs.weights {
+            return false
+        }
+        if lhs.generator != rhs.generator {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(uid)
+        hasher.combine(name)
+        hasher.combine(kind)
+        hasher.combine(parent)
+        hasher.combine(children)
+        hasher.combine(translation)
+        hasher.combine(rotation)
+        hasher.combine(scale)
+        hasher.combine(visible)
+        hasher.combine(datablock)
+        hasher.combine(skin)
+        hasher.combine(weights)
+        hasher.combine(generator)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideRecordNode: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideRecordNode {
+        return
+            try TrideRecordNode(
+                uid: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                kind: FfiConverterString.read(from: &buf), 
+                parent: FfiConverterOptionUInt32.read(from: &buf), 
+                children: FfiConverterSequenceUInt32.read(from: &buf), 
+                translation: FfiConverterSequenceDouble.read(from: &buf), 
+                rotation: FfiConverterSequenceDouble.read(from: &buf), 
+                scale: FfiConverterSequenceDouble.read(from: &buf), 
+                visible: FfiConverterBool.read(from: &buf), 
+                datablock: FfiConverterOptionString.read(from: &buf), 
+                skin: FfiConverterOptionUInt32.read(from: &buf), 
+                weights: FfiConverterSequenceDouble.read(from: &buf), 
+                generator: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideRecordNode, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.uid, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterOptionUInt32.write(value.parent, into: &buf)
+        FfiConverterSequenceUInt32.write(value.children, into: &buf)
+        FfiConverterSequenceDouble.write(value.translation, into: &buf)
+        FfiConverterSequenceDouble.write(value.rotation, into: &buf)
+        FfiConverterSequenceDouble.write(value.scale, into: &buf)
+        FfiConverterBool.write(value.visible, into: &buf)
+        FfiConverterOptionString.write(value.datablock, into: &buf)
+        FfiConverterOptionUInt32.write(value.skin, into: &buf)
+        FfiConverterSequenceDouble.write(value.weights, into: &buf)
+        FfiConverterOptionString.write(value.generator, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideRecordNode_lift(_ buf: RustBuffer) throws -> TrideRecordNode {
+    return try FfiConverterTypeTrideRecordNode.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideRecordNode_lower(_ value: TrideRecordNode) -> RustBuffer {
+    return FfiConverterTypeTrideRecordNode.lower(value)
+}
+
+
+/**
+ * One material instance parameter by gltfio's name.
+ */
+public struct TrideRecordParam {
+    public var name: String
+    public var value: [Double]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, value: [Double]) {
+        self.name = name
+        self.value = value
+    }
+}
+
+
+
+extension TrideRecordParam: Equatable, Hashable {
+    public static func ==(lhs: TrideRecordParam, rhs: TrideRecordParam) -> Bool {
+        if lhs.name != rhs.name {
+            return false
+        }
+        if lhs.value != rhs.value {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(name)
+        hasher.combine(value)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideRecordParam: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideRecordParam {
+        return
+            try TrideRecordParam(
+                name: FfiConverterString.read(from: &buf), 
+                value: FfiConverterSequenceDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideRecordParam, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterSequenceDouble.write(value.value, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideRecordParam_lift(_ buf: RustBuffer) throws -> TrideRecordParam {
+    return try FfiConverterTypeTrideRecordParam.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideRecordParam_lower(_ value: TrideRecordParam) -> RustBuffer {
+    return FfiConverterTypeTrideRecordParam.lower(value)
+}
+
+
+/**
+ * One skin (glTF §3.7.3) of [`TrideSceneRecord`].
+ */
+public struct TrideRecordSkin {
+    public var uid: String
+    /**
+     * Each joint's row, palette order; `None` = a joint the table lacks (identity bone).
+     */
+    public var joints: [UInt32?]
+    /**
+     * One `f32 × 16` column-major matrix per joint, little-endian bytes.
+     */
+    public var inverseBindMatrices: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(uid: String, 
+        /**
+         * Each joint's row, palette order; `None` = a joint the table lacks (identity bone).
+         */joints: [UInt32?], 
+        /**
+         * One `f32 × 16` column-major matrix per joint, little-endian bytes.
+         */inverseBindMatrices: Data) {
+        self.uid = uid
+        self.joints = joints
+        self.inverseBindMatrices = inverseBindMatrices
+    }
+}
+
+
+
+extension TrideRecordSkin: Equatable, Hashable {
+    public static func ==(lhs: TrideRecordSkin, rhs: TrideRecordSkin) -> Bool {
+        if lhs.uid != rhs.uid {
+            return false
+        }
+        if lhs.joints != rhs.joints {
+            return false
+        }
+        if lhs.inverseBindMatrices != rhs.inverseBindMatrices {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(uid)
+        hasher.combine(joints)
+        hasher.combine(inverseBindMatrices)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideRecordSkin: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideRecordSkin {
+        return
+            try TrideRecordSkin(
+                uid: FfiConverterString.read(from: &buf), 
+                joints: FfiConverterSequenceOptionUInt32.read(from: &buf), 
+                inverseBindMatrices: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideRecordSkin, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.uid, into: &buf)
+        FfiConverterSequenceOptionUInt32.write(value.joints, into: &buf)
+        FfiConverterData.write(value.inverseBindMatrices, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideRecordSkin_lift(_ buf: RustBuffer) throws -> TrideRecordSkin {
+    return try FfiConverterTypeTrideRecordSkin.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideRecordSkin_lower(_ value: TrideRecordSkin) -> RustBuffer {
+    return FfiConverterTypeTrideRecordSkin.lower(value)
+}
+
+
+/**
+ * A standard-form material as gltfio sets it up: initial parameters by gltfio's names, the maps
+ * by glTF slot, sides, alpha. The ubershader's `MaterialKey` belongs to a mesh group, not here.
+ */
+public struct TrideRecordStandard {
+    public var params: [TrideRecordParam]
+    public var maps: [TrideRecordMap]
+    public var doubleSided: Bool
+    /**
+     * `"opaque" | "mask" | "blend"`.
+     */
+    public var alphaMode: String
+    public var alphaCutoff: Double?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(params: [TrideRecordParam], maps: [TrideRecordMap], doubleSided: Bool, 
+        /**
+         * `"opaque" | "mask" | "blend"`.
+         */alphaMode: String, alphaCutoff: Double?) {
+        self.params = params
+        self.maps = maps
+        self.doubleSided = doubleSided
+        self.alphaMode = alphaMode
+        self.alphaCutoff = alphaCutoff
+    }
+}
+
+
+
+extension TrideRecordStandard: Equatable, Hashable {
+    public static func ==(lhs: TrideRecordStandard, rhs: TrideRecordStandard) -> Bool {
+        if lhs.params != rhs.params {
+            return false
+        }
+        if lhs.maps != rhs.maps {
+            return false
+        }
+        if lhs.doubleSided != rhs.doubleSided {
+            return false
+        }
+        if lhs.alphaMode != rhs.alphaMode {
+            return false
+        }
+        if lhs.alphaCutoff != rhs.alphaCutoff {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(params)
+        hasher.combine(maps)
+        hasher.combine(doubleSided)
+        hasher.combine(alphaMode)
+        hasher.combine(alphaCutoff)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideRecordStandard: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideRecordStandard {
+        return
+            try TrideRecordStandard(
+                params: FfiConverterSequenceTypeTrideRecordParam.read(from: &buf), 
+                maps: FfiConverterSequenceTypeTrideRecordMap.read(from: &buf), 
+                doubleSided: FfiConverterBool.read(from: &buf), 
+                alphaMode: FfiConverterString.read(from: &buf), 
+                alphaCutoff: FfiConverterOptionDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideRecordStandard, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeTrideRecordParam.write(value.params, into: &buf)
+        FfiConverterSequenceTypeTrideRecordMap.write(value.maps, into: &buf)
+        FfiConverterBool.write(value.doubleSided, into: &buf)
+        FfiConverterString.write(value.alphaMode, into: &buf)
+        FfiConverterOptionDouble.write(value.alphaCutoff, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideRecordStandard_lift(_ buf: RustBuffer) throws -> TrideRecordStandard {
+    return try FfiConverterTypeTrideRecordStandard.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideRecordStandard_lower(_ value: TrideRecordStandard) -> RustBuffer {
+    return FfiConverterTypeTrideRecordStandard.lower(value)
+}
+
+
+/**
  * The host's render knobs over the scene's render settings; every `None` keeps the
  * scene's value. Bloom, shadows and depth of field only switch off: `Some(true)` keeps the
  * scene's.
@@ -7535,6 +9728,243 @@ public func FfiConverterTypeTrideRenderSettings_lift(_ buf: RustBuffer) throws -
 #endif
 public func FfiConverterTypeTrideRenderSettings_lower(_ value: TrideRenderSettings) -> RustBuffer {
     return FfiConverterTypeTrideRenderSettings.lower(value)
+}
+
+
+/**
+ * The scene record: what a host builds its scene from, one call at
+ * load ([`TrideScene::scene_record`]); meshes stay one call per datablock
+ * ([`TrideScene::datablock_mesh`]). The scene as loaded, whenever asked. Rows are
+ * `manifest.nodes` positions — the address everywhere in the record.
+ */
+public struct TrideSceneRecord {
+    /**
+     * `"skins" | "morphs" | "lines" | "points" | "strips"`: what a host must draw of the scene;
+     * one it does not draw it says once (a `partialDraw` notice).
+     */
+    public var requires: [String]
+    public var nodes: [TrideRecordNode]
+    public var materials: [TrideRecordMaterial]
+    public var skins: [TrideRecordSkin]
+    public var lights: [TrideRecordLight]
+    public var cameras: [TrideRecordCamera]
+    /**
+     * `manifest.images`; bytes through [`TrideScene::asset_bytes`] of `uri`.
+     */
+    public var images: [TrideRecordImage]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * `"skins" | "morphs" | "lines" | "points" | "strips"`: what a host must draw of the scene;
+         * one it does not draw it says once (a `partialDraw` notice).
+         */requires: [String], nodes: [TrideRecordNode], materials: [TrideRecordMaterial], skins: [TrideRecordSkin], lights: [TrideRecordLight], cameras: [TrideRecordCamera], 
+        /**
+         * `manifest.images`; bytes through [`TrideScene::asset_bytes`] of `uri`.
+         */images: [TrideRecordImage]) {
+        self.requires = requires
+        self.nodes = nodes
+        self.materials = materials
+        self.skins = skins
+        self.lights = lights
+        self.cameras = cameras
+        self.images = images
+    }
+}
+
+
+
+extension TrideSceneRecord: Equatable, Hashable {
+    public static func ==(lhs: TrideSceneRecord, rhs: TrideSceneRecord) -> Bool {
+        if lhs.requires != rhs.requires {
+            return false
+        }
+        if lhs.nodes != rhs.nodes {
+            return false
+        }
+        if lhs.materials != rhs.materials {
+            return false
+        }
+        if lhs.skins != rhs.skins {
+            return false
+        }
+        if lhs.lights != rhs.lights {
+            return false
+        }
+        if lhs.cameras != rhs.cameras {
+            return false
+        }
+        if lhs.images != rhs.images {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(requires)
+        hasher.combine(nodes)
+        hasher.combine(materials)
+        hasher.combine(skins)
+        hasher.combine(lights)
+        hasher.combine(cameras)
+        hasher.combine(images)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideSceneRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideSceneRecord {
+        return
+            try TrideSceneRecord(
+                requires: FfiConverterSequenceString.read(from: &buf), 
+                nodes: FfiConverterSequenceTypeTrideRecordNode.read(from: &buf), 
+                materials: FfiConverterSequenceTypeTrideRecordMaterial.read(from: &buf), 
+                skins: FfiConverterSequenceTypeTrideRecordSkin.read(from: &buf), 
+                lights: FfiConverterSequenceTypeTrideRecordLight.read(from: &buf), 
+                cameras: FfiConverterSequenceTypeTrideRecordCamera.read(from: &buf), 
+                images: FfiConverterSequenceTypeTrideRecordImage.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideSceneRecord, into buf: inout [UInt8]) {
+        FfiConverterSequenceString.write(value.requires, into: &buf)
+        FfiConverterSequenceTypeTrideRecordNode.write(value.nodes, into: &buf)
+        FfiConverterSequenceTypeTrideRecordMaterial.write(value.materials, into: &buf)
+        FfiConverterSequenceTypeTrideRecordSkin.write(value.skins, into: &buf)
+        FfiConverterSequenceTypeTrideRecordLight.write(value.lights, into: &buf)
+        FfiConverterSequenceTypeTrideRecordCamera.write(value.cameras, into: &buf)
+        FfiConverterSequenceTypeTrideRecordImage.write(value.images, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideSceneRecord_lift(_ buf: RustBuffer) throws -> TrideSceneRecord {
+    return try FfiConverterTypeTrideSceneRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideSceneRecord_lower(_ value: TrideSceneRecord) -> RustBuffer {
+    return FfiConverterTypeTrideSceneRecord.lower(value)
+}
+
+
+/**
+ * One part of a skin cut over 256 joints: an index range with its palette.
+ */
+public struct TrideSkinPart {
+    /**
+     * The part's number across the datablock: [`TrideBonePalette::part`].
+     */
+    public var part: UInt32
+    /**
+     * The draw group the range lies in (0 for a mesh of one group).
+     */
+    public var group: UInt32
+    public var indexStart: UInt32
+    public var indexCount: UInt32
+    /**
+     * The palette: positions in `skin.joints`, ascending, at most 256.
+     */
+    public var joints: [UInt32]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The part's number across the datablock: [`TrideBonePalette::part`].
+         */part: UInt32, 
+        /**
+         * The draw group the range lies in (0 for a mesh of one group).
+         */group: UInt32, indexStart: UInt32, indexCount: UInt32, 
+        /**
+         * The palette: positions in `skin.joints`, ascending, at most 256.
+         */joints: [UInt32]) {
+        self.part = part
+        self.group = group
+        self.indexStart = indexStart
+        self.indexCount = indexCount
+        self.joints = joints
+    }
+}
+
+
+
+extension TrideSkinPart: Equatable, Hashable {
+    public static func ==(lhs: TrideSkinPart, rhs: TrideSkinPart) -> Bool {
+        if lhs.part != rhs.part {
+            return false
+        }
+        if lhs.group != rhs.group {
+            return false
+        }
+        if lhs.indexStart != rhs.indexStart {
+            return false
+        }
+        if lhs.indexCount != rhs.indexCount {
+            return false
+        }
+        if lhs.joints != rhs.joints {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(part)
+        hasher.combine(group)
+        hasher.combine(indexStart)
+        hasher.combine(indexCount)
+        hasher.combine(joints)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideSkinPart: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideSkinPart {
+        return
+            try TrideSkinPart(
+                part: FfiConverterUInt32.read(from: &buf), 
+                group: FfiConverterUInt32.read(from: &buf), 
+                indexStart: FfiConverterUInt32.read(from: &buf), 
+                indexCount: FfiConverterUInt32.read(from: &buf), 
+                joints: FfiConverterSequenceUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideSkinPart, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.part, into: &buf)
+        FfiConverterUInt32.write(value.group, into: &buf)
+        FfiConverterUInt32.write(value.indexStart, into: &buf)
+        FfiConverterUInt32.write(value.indexCount, into: &buf)
+        FfiConverterSequenceUInt32.write(value.joints, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideSkinPart_lift(_ buf: RustBuffer) throws -> TrideSkinPart {
+    return try FfiConverterTypeTrideSkinPart.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideSkinPart_lower(_ value: TrideSkinPart) -> RustBuffer {
+    return FfiConverterTypeTrideSkinPart.lower(value)
 }
 
 
@@ -7933,6 +10363,217 @@ public func FfiConverterTypeTrideStateChange_lower(_ value: TrideStateChange) ->
 
 
 /**
+ * One vertex stream as the file stores it, for Filament's `VertexBuffer` as gltfio sets it:
+ * `AttributeType` of `component` × `components`, `normalized`, `byteStride` = `stride`.
+ */
+public struct TrideStoredStream {
+    /**
+     * `"i8"`, `"u8"`, `"i16"` or `"u16"` (Filament `BYTE…`, `UBYTE…`, `SHORT…`, `USHORT…`).
+     */
+    public var component: String
+    public var normalized: Bool
+    /**
+     * Components per vertex (2, 3 or 4).
+     */
+    public var components: UInt8
+    /**
+     * Bytes per vertex: the components padded to a multiple of 4.
+     */
+    public var stride: UInt32
+    /**
+     * Little-endian rows, one per vertex.
+     */
+    public var bytes: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * `"i8"`, `"u8"`, `"i16"` or `"u16"` (Filament `BYTE…`, `UBYTE…`, `SHORT…`, `USHORT…`).
+         */component: String, normalized: Bool, 
+        /**
+         * Components per vertex (2, 3 or 4).
+         */components: UInt8, 
+        /**
+         * Bytes per vertex: the components padded to a multiple of 4.
+         */stride: UInt32, 
+        /**
+         * Little-endian rows, one per vertex.
+         */bytes: Data) {
+        self.component = component
+        self.normalized = normalized
+        self.components = components
+        self.stride = stride
+        self.bytes = bytes
+    }
+}
+
+
+
+extension TrideStoredStream: Equatable, Hashable {
+    public static func ==(lhs: TrideStoredStream, rhs: TrideStoredStream) -> Bool {
+        if lhs.component != rhs.component {
+            return false
+        }
+        if lhs.normalized != rhs.normalized {
+            return false
+        }
+        if lhs.components != rhs.components {
+            return false
+        }
+        if lhs.stride != rhs.stride {
+            return false
+        }
+        if lhs.bytes != rhs.bytes {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(component)
+        hasher.combine(normalized)
+        hasher.combine(components)
+        hasher.combine(stride)
+        hasher.combine(bytes)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideStoredStream: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideStoredStream {
+        return
+            try TrideStoredStream(
+                component: FfiConverterString.read(from: &buf), 
+                normalized: FfiConverterBool.read(from: &buf), 
+                components: FfiConverterUInt8.read(from: &buf), 
+                stride: FfiConverterUInt32.read(from: &buf), 
+                bytes: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideStoredStream, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.component, into: &buf)
+        FfiConverterBool.write(value.normalized, into: &buf)
+        FfiConverterUInt8.write(value.components, into: &buf)
+        FfiConverterUInt32.write(value.stride, into: &buf)
+        FfiConverterData.write(value.bytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideStoredStream_lift(_ buf: RustBuffer) throws -> TrideStoredStream {
+    return try FfiConverterTypeTrideStoredStream.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideStoredStream_lower(_ value: TrideStoredStream) -> RustBuffer {
+    return FfiConverterTypeTrideStoredStream.lower(value)
+}
+
+
+/**
+ * The stored forms of a mesh's GPU-widened streams; `None` = upload the `f32` stream.
+ */
+public struct TrideStoredStreams {
+    public var positions: TrideStoredStream?
+    public var uvs: TrideStoredStream?
+    public var uvs1: TrideStoredStream?
+    public var colors: TrideStoredStream?
+    public var weights: TrideStoredStream?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(positions: TrideStoredStream?, uvs: TrideStoredStream?, uvs1: TrideStoredStream?, colors: TrideStoredStream?, weights: TrideStoredStream?) {
+        self.positions = positions
+        self.uvs = uvs
+        self.uvs1 = uvs1
+        self.colors = colors
+        self.weights = weights
+    }
+}
+
+
+
+extension TrideStoredStreams: Equatable, Hashable {
+    public static func ==(lhs: TrideStoredStreams, rhs: TrideStoredStreams) -> Bool {
+        if lhs.positions != rhs.positions {
+            return false
+        }
+        if lhs.uvs != rhs.uvs {
+            return false
+        }
+        if lhs.uvs1 != rhs.uvs1 {
+            return false
+        }
+        if lhs.colors != rhs.colors {
+            return false
+        }
+        if lhs.weights != rhs.weights {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(positions)
+        hasher.combine(uvs)
+        hasher.combine(uvs1)
+        hasher.combine(colors)
+        hasher.combine(weights)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideStoredStreams: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideStoredStreams {
+        return
+            try TrideStoredStreams(
+                positions: FfiConverterOptionTypeTrideStoredStream.read(from: &buf), 
+                uvs: FfiConverterOptionTypeTrideStoredStream.read(from: &buf), 
+                uvs1: FfiConverterOptionTypeTrideStoredStream.read(from: &buf), 
+                colors: FfiConverterOptionTypeTrideStoredStream.read(from: &buf), 
+                weights: FfiConverterOptionTypeTrideStoredStream.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideStoredStreams, into buf: inout [UInt8]) {
+        FfiConverterOptionTypeTrideStoredStream.write(value.positions, into: &buf)
+        FfiConverterOptionTypeTrideStoredStream.write(value.uvs, into: &buf)
+        FfiConverterOptionTypeTrideStoredStream.write(value.uvs1, into: &buf)
+        FfiConverterOptionTypeTrideStoredStream.write(value.colors, into: &buf)
+        FfiConverterOptionTypeTrideStoredStream.write(value.weights, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideStoredStreams_lift(_ buf: RustBuffer) throws -> TrideStoredStreams {
+    return try FfiConverterTypeTrideStoredStreams.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideStoredStreams_lower(_ value: TrideStoredStreams) -> RustBuffer {
+    return FfiConverterTypeTrideStoredStreams.lower(value)
+}
+
+
+/**
  * Handle for [`TrideScene::unsubscribe`] / subscription methods (opaque `u64` token).
  */
 public struct TrideSubscriptionId {
@@ -8298,6 +10939,106 @@ public func FfiConverterTypeTrideToneMappingOptions_lift(_ buf: RustBuffer) thro
 #endif
 public func FfiConverterTypeTrideToneMappingOptions_lower(_ value: TrideToneMappingOptions) -> RustBuffer {
     return FfiConverterTypeTrideToneMappingOptions.lower(value)
+}
+
+
+/**
+ * The attributes a datablock mesh's draw group carries in the file: the host
+ * frames the group as gltfio's `TangentsJob` frames its primitive — `SurfaceOrientation` over
+ * the group's range with `normals` / `tangents` / `uvs` only where flagged (no normals: flat
+ * ones where the material is lit, none where unlit).
+ */
+public struct TrideVertexAttributes {
+    public var normals: Bool
+    /**
+     * `TEXCOORD_0`.
+     */
+    public var uv0: Bool
+    public var tangents: Bool
+    /**
+     * Any `COLOR_n`: the key's `has_vertex_colors`.
+     */
+    public var colors: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(normals: Bool, 
+        /**
+         * `TEXCOORD_0`.
+         */uv0: Bool, tangents: Bool, 
+        /**
+         * Any `COLOR_n`: the key's `has_vertex_colors`.
+         */colors: Bool) {
+        self.normals = normals
+        self.uv0 = uv0
+        self.tangents = tangents
+        self.colors = colors
+    }
+}
+
+
+
+extension TrideVertexAttributes: Equatable, Hashable {
+    public static func ==(lhs: TrideVertexAttributes, rhs: TrideVertexAttributes) -> Bool {
+        if lhs.normals != rhs.normals {
+            return false
+        }
+        if lhs.uv0 != rhs.uv0 {
+            return false
+        }
+        if lhs.tangents != rhs.tangents {
+            return false
+        }
+        if lhs.colors != rhs.colors {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(normals)
+        hasher.combine(uv0)
+        hasher.combine(tangents)
+        hasher.combine(colors)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideVertexAttributes: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideVertexAttributes {
+        return
+            try TrideVertexAttributes(
+                normals: FfiConverterBool.read(from: &buf), 
+                uv0: FfiConverterBool.read(from: &buf), 
+                tangents: FfiConverterBool.read(from: &buf), 
+                colors: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideVertexAttributes, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.normals, into: &buf)
+        FfiConverterBool.write(value.uv0, into: &buf)
+        FfiConverterBool.write(value.tangents, into: &buf)
+        FfiConverterBool.write(value.colors, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideVertexAttributes_lift(_ buf: RustBuffer) throws -> TrideVertexAttributes {
+    return try FfiConverterTypeTrideVertexAttributes.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideVertexAttributes_lower(_ value: TrideVertexAttributes) -> RustBuffer {
+    return FfiConverterTypeTrideVertexAttributes.lower(value)
 }
 
 
@@ -10434,6 +13175,30 @@ fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeTrideBounds: FfiConverterRustBuffer {
+    typealias SwiftType = TrideBounds?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeTrideBounds.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeTrideBounds.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeTrideDatablockMesh: FfiConverterRustBuffer {
     typealias SwiftType = TrideDatablockMesh?
 
@@ -10626,6 +13391,30 @@ fileprivate struct FfiConverterOptionTypeTrideMaterialGraph: FfiConverterRustBuf
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeTrideMaterialKey: FfiConverterRustBuffer {
+    typealias SwiftType = TrideMaterialKey?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeTrideMaterialKey.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeTrideMaterialKey.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeTrideMaterialPackageInfo: FfiConverterRustBuffer {
     typealias SwiftType = TrideMaterialPackageInfo?
 
@@ -10722,6 +13511,30 @@ fileprivate struct FfiConverterOptionTypeTridePulseTable: FfiConverterRustBuffer
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeTrideRecordStandard: FfiConverterRustBuffer {
+    typealias SwiftType = TrideRecordStandard?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeTrideRecordStandard.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeTrideRecordStandard.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeTrideRenderSettings: FfiConverterRustBuffer {
     typealias SwiftType = TrideRenderSettings?
 
@@ -10738,6 +13551,78 @@ fileprivate struct FfiConverterOptionTypeTrideRenderSettings: FfiConverterRustBu
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeTrideRenderSettings.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeTrideSceneRecord: FfiConverterRustBuffer {
+    typealias SwiftType = TrideSceneRecord?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeTrideSceneRecord.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeTrideSceneRecord.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeTrideStoredStream: FfiConverterRustBuffer {
+    typealias SwiftType = TrideStoredStream?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeTrideStoredStream.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeTrideStoredStream.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeTrideStoredStreams: FfiConverterRustBuffer {
+    typealias SwiftType = TrideStoredStreams?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeTrideStoredStreams.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeTrideStoredStreams.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -10770,6 +13655,30 @@ fileprivate struct FfiConverterOptionTypeTrideTextureRef: FfiConverterRustBuffer
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeTrideVertexAttributes: FfiConverterRustBuffer {
+    typealias SwiftType = TrideVertexAttributes?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeTrideVertexAttributes.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeTrideVertexAttributes.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionSequenceDouble: FfiConverterRustBuffer {
     typealias SwiftType = [Double]?
 
@@ -10788,6 +13697,31 @@ fileprivate struct FfiConverterOptionSequenceDouble: FfiConverterRustBuffer {
         case 1: return try FfiConverterSequenceDouble.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = [UInt32]
+
+    public static func write(_ value: [UInt32], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterUInt32.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UInt32] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UInt32]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterUInt32.read(from: &buf))
+        }
+        return seq
     }
 }
 
@@ -10944,6 +13878,31 @@ fileprivate struct FfiConverterSequenceTypeTrideBindingDescriptor: FfiConverterR
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeTrideBonePalette: FfiConverterRustBuffer {
+    typealias SwiftType = [TrideBonePalette]
+
+    public static func write(_ value: [TrideBonePalette], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTrideBonePalette.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TrideBonePalette] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TrideBonePalette]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTrideBonePalette.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeTrideBoundInput: FfiConverterRustBuffer {
     typealias SwiftType = [TrideBoundInput]
 
@@ -10986,6 +13945,31 @@ fileprivate struct FfiConverterSequenceTypeTrideCameraDescriptor: FfiConverterRu
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeTrideCameraDescriptor.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeTrideDatablockPart: FfiConverterRustBuffer {
+    typealias SwiftType = [TrideDatablockPart]
+
+    public static func write(_ value: [TrideDatablockPart], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTrideDatablockPart.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TrideDatablockPart] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TrideDatablockPart]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTrideDatablockPart.read(from: &buf))
         }
         return seq
     }
@@ -11219,6 +14203,31 @@ fileprivate struct FfiConverterSequenceTypeTrideModuleFrame: FfiConverterRustBuf
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeTrideMorphTarget: FfiConverterRustBuffer {
+    typealias SwiftType = [TrideMorphTarget]
+
+    public static func write(_ value: [TrideMorphTarget], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTrideMorphTarget.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TrideMorphTarget] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TrideMorphTarget]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTrideMorphTarget.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeTrideMutation: FfiConverterRustBuffer {
     typealias SwiftType = [TrideMutation]
 
@@ -11236,31 +14245,6 @@ fileprivate struct FfiConverterSequenceTypeTrideMutation: FfiConverterRustBuffer
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeTrideMutation.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterSequenceTypeTrideNodeMetaEntry: FfiConverterRustBuffer {
-    typealias SwiftType = [TrideNodeMetaEntry]
-
-    public static func write(_ value: [TrideNodeMetaEntry], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeTrideNodeMetaEntry.write(item, into: &buf)
-        }
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TrideNodeMetaEntry] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [TrideNodeMetaEntry]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            seq.append(try FfiConverterTypeTrideNodeMetaEntry.read(from: &buf))
         }
         return seq
     }
@@ -11311,6 +14295,281 @@ fileprivate struct FfiConverterSequenceTypeTridePointerHit: FfiConverterRustBuff
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeTridePointerHit.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeTrideRecordCamera: FfiConverterRustBuffer {
+    typealias SwiftType = [TrideRecordCamera]
+
+    public static func write(_ value: [TrideRecordCamera], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTrideRecordCamera.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TrideRecordCamera] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TrideRecordCamera]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTrideRecordCamera.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeTrideRecordGraph: FfiConverterRustBuffer {
+    typealias SwiftType = [TrideRecordGraph]
+
+    public static func write(_ value: [TrideRecordGraph], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTrideRecordGraph.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TrideRecordGraph] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TrideRecordGraph]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTrideRecordGraph.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeTrideRecordImage: FfiConverterRustBuffer {
+    typealias SwiftType = [TrideRecordImage]
+
+    public static func write(_ value: [TrideRecordImage], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTrideRecordImage.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TrideRecordImage] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TrideRecordImage]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTrideRecordImage.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeTrideRecordLight: FfiConverterRustBuffer {
+    typealias SwiftType = [TrideRecordLight]
+
+    public static func write(_ value: [TrideRecordLight], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTrideRecordLight.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TrideRecordLight] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TrideRecordLight]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTrideRecordLight.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeTrideRecordMap: FfiConverterRustBuffer {
+    typealias SwiftType = [TrideRecordMap]
+
+    public static func write(_ value: [TrideRecordMap], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTrideRecordMap.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TrideRecordMap] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TrideRecordMap]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTrideRecordMap.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeTrideRecordMaterial: FfiConverterRustBuffer {
+    typealias SwiftType = [TrideRecordMaterial]
+
+    public static func write(_ value: [TrideRecordMaterial], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTrideRecordMaterial.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TrideRecordMaterial] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TrideRecordMaterial]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTrideRecordMaterial.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeTrideRecordNode: FfiConverterRustBuffer {
+    typealias SwiftType = [TrideRecordNode]
+
+    public static func write(_ value: [TrideRecordNode], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTrideRecordNode.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TrideRecordNode] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TrideRecordNode]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTrideRecordNode.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeTrideRecordParam: FfiConverterRustBuffer {
+    typealias SwiftType = [TrideRecordParam]
+
+    public static func write(_ value: [TrideRecordParam], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTrideRecordParam.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TrideRecordParam] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TrideRecordParam]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTrideRecordParam.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeTrideRecordSkin: FfiConverterRustBuffer {
+    typealias SwiftType = [TrideRecordSkin]
+
+    public static func write(_ value: [TrideRecordSkin], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTrideRecordSkin.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TrideRecordSkin] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TrideRecordSkin]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTrideRecordSkin.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeTrideSkinPart: FfiConverterRustBuffer {
+    typealias SwiftType = [TrideSkinPart]
+
+    public static func write(_ value: [TrideSkinPart], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTrideSkinPart.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TrideSkinPart] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TrideSkinPart]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTrideSkinPart.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceOptionUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = [UInt32?]
+
+    public static func write(_ value: [UInt32?], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterOptionUInt32.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UInt32?] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UInt32?]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterOptionUInt32.read(from: &buf))
         }
         return seq
     }
@@ -11694,7 +14953,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_tride_ffi_checksum_method_tridescene_append_audio() != 16015) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_tride_ffi_checksum_method_tridescene_asset_bytes() != 59192) {
+    if (uniffi_tride_ffi_checksum_method_tridescene_asset_bytes() != 57501) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tride_ffi_checksum_method_tridescene_background_color() != 61595) {
@@ -11715,7 +14974,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_tride_ffi_checksum_method_tridescene_current_state() != 7297) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_tride_ffi_checksum_method_tridescene_datablock_mesh() != 47350) {
+    if (uniffi_tride_ffi_checksum_method_tridescene_datablock_mesh() != 35639) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tride_ffi_checksum_method_tridescene_default_framing() != 47294) {
@@ -11790,9 +15049,6 @@ private var initializationResult: InitializationResult = {
     if (uniffi_tride_ffi_checksum_method_tridescene_list_cameras() != 62130) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_tride_ffi_checksum_method_tridescene_list_carrier_metadata() != 55623) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_tride_ffi_checksum_method_tridescene_list_deformed_nodes() != 18167) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -11800,9 +15056,6 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tride_ffi_checksum_method_tridescene_list_lights() != 15176) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_tride_ffi_checksum_method_tridescene_list_node_metadata() != 2514) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tride_ffi_checksum_method_tridescene_list_parametric_nodes() != 53329) {
@@ -11821,6 +15074,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tride_ffi_checksum_method_tridescene_material_params() != 45436) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_tride_ffi_checksum_method_tridescene_node_worlds() != 40062) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tride_ffi_checksum_method_tridescene_pick() != 52397) {
@@ -11844,19 +15100,16 @@ private var initializationResult: InitializationResult = {
     if (uniffi_tride_ffi_checksum_method_tridescene_request_full_frame() != 18476) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_tride_ffi_checksum_method_tridescene_reset() != 60852) {
+    if (uniffi_tride_ffi_checksum_method_tridescene_reset() != 50110) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tride_ffi_checksum_method_tridescene_reset_audio() != 61102) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_tride_ffi_checksum_method_tridescene_resource_names() != 46477) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_tride_ffi_checksum_method_tridescene_resume() != 10048) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_tride_ffi_checksum_method_tridescene_scene_gltf_bytes() != 34053) {
+    if (uniffi_tride_ffi_checksum_method_tridescene_scene_record() != 7025) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tride_ffi_checksum_method_tridescene_scroll() != 8139) {
@@ -11869,6 +15122,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tride_ffi_checksum_method_tridescene_set_changed_only() != 20563) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_tride_ffi_checksum_method_tridescene_set_draw_visibility() != 12155) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tride_ffi_checksum_method_tridescene_set_image() != 61389) {

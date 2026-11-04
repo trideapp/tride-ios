@@ -7,11 +7,10 @@
 /// - MainActor-only with the Filament bridge. A whole rotation value is the canonical 4-component
 ///   quaternion `[qx, qy, qz, qw]` (read verbatim into `simd_quatf`); a 3-component Euler XYZ value
 ///   (radians) from older manifests is still accepted, with a warn-once notice in OSLog.
-///   Per-axis `rotation.{x|y|z}` channels are Euler radians; Euler XYZ ↔ quaternion (a node's lanes
-///   seeded from its rest pose, light directions) is the core's (`eulerToQuat` / `quatToEuler`), so
-///   a pose on a gimbal pole seeds the lanes alike on every host.
-/// - A light / camera with a baked carrier node
-///   (`listCarrierMetadata`) is posed through that node — spatial channels write the carrier
+///   A node's rotation arrives whole, as the core composed it: no node axis is
+///   composed here. Euler XYZ ↔ quaternion (light directions) is the core's (`eulerToQuat`).
+/// - A light / camera is posed through its carrier place (`RecordScene.carrierPlace`) — spatial
+///   channels write the carrier
 ///   TRS via the index-based node path; the Light / Camera components stay at identity. Its LOCAL
 ///   pose is held between batches (authored at bind): a lane patches one axis of the held pose, so
 ///   an axis a batch does not carry keeps its last value while another moves; a complete batch
@@ -38,16 +37,41 @@
 ///   `PrecompiledMaterials`), checked against the bridge's Filament first; their uniforms come from the core
 ///   (`materialGraphValues`), again on every write to the slug — only the uniforms whose lanes moved
 ///   go to the bridge (`SentUniforms`); a node-graph input (`isGraphLeaf`) never moves
-///   the look, so a tick writing only those does not pull it. A missing or foreign package keeps
-///   the built-in look. A module batch whose instanced package samples the instance rows gets
-///   `generatorModuleColors` with its transforms; no other batch pulls them.
+///   the look, so a tick writing only those does not pull it. Without a loaded package a file mesh
+///   draws the record's glTF form, generated meshes and batches keep the built-in look; a package
+///   this device refused is `material.package-refused` in the core's words. A module batch whose
+///   instanced package samples the instance rows gets `generatorModuleColors` with its transforms;
+///   no other batch pulls them.
 /// - A photo slot shows what the core's groups say (`picture`, else the placeholder),
 ///   read at registration and again whenever its slug is written; the pixels come from the scene's
 ///   `HostImageStore`. A picture the store does not hold (a host script's `images` step) keeps the
 ///   placeholder, said once.
-/// - The look the core hands iOS (`materialParams`) carries no glass (`glassFields`): a write to
-///   one still recolours the slug and is said once per material and field — an imported glTF glass
-///   keeps the value saved in the scene.
+/// - `/materialOverrides/{slug}/gltf/{name}`: a gltfio parameter of a material a file mesh draws,
+///   resolved by the core (factors, strengths, 9-float UV matrices); set as sent on the standard
+///   instances of the slug that declare it — nothing composed here. A file mesh's instance takes
+///   only this: the look recolours the built-in instances (generated meshes, module batches).
+/// - The scene is the one the view built from the core's record (`bind(to:record:)`): a node's
+///   place is its row, a light's / camera's its carrier place (`RecordScene`) — the same index-based bridge
+///   path, never a name or a glTF index; reads back from the core go by uid. Every node with a
+///   datablock draws the core's mesh under its row: a file mesh in the record's materials on the
+///   mesh family (`setStandardMaterials`) with its parts and morph targets (`/weights/{n}` of the
+///   row reach them, starting from the node's rest weights), a procedural one in the core's look. Visibility is the
+///   core's (`/node/{uid}/drawVisible`):
+///   a node's own flag draws nothing by itself, no walk over the ancestors; glTF material indices
+///   (`/materials/{i}`) address nothing here, said once.
+/// - Each skin part's joints are kept from the upload (`skinPartJoints`): after the scene's
+///   source is released no file mesh is read again; one asked for later is a problem saying so.
+/// - The built-in look the core hands iOS (`materialParams`: generated meshes, module batches)
+///   carries no glass (`glassFields`): a write to one still recolours the slug and, where a built-in
+///   instance wears the slug (`wearsBuiltInLook`, asked after the tick's meshes), is said once per
+///   material and field. A file mesh takes glass from the core's glTF parameters (`/gltf/*`); a write
+///   that changes its key (`/materialOverrides/{slug}/gltf/materialKey`, an object of the core's key
+///   fields by their FFI names, `hasVertexColors` left out) makes the slug's standard instances again
+///   for it (`rekeyStandard`), in batch order with the parameters after it.
+/// - `/materialOverrides/{slug}/alphaCutoff` and `…/doubleSided` also set instance state
+///   (`setInstanceState`, in the same batch order): the core sends no glTF parameter for them, so
+///   they reach every instance of the slug, a file mesh's included, as Filament's own
+///   `_maskThreshold` / `_doubleSided`.
 
 import Foundation
 import os
@@ -88,6 +112,9 @@ final class PointerDispatcher {
         /// `/nodes/{i}/visible` (and `/node/{uid}/visible` rewritten) — the node's own flag; what
         /// is drawn is the effective one (AND of every ancestor, like the editor's `effectiveVisible`).
         case nodeVisible(index: Int)
+        /// `/node/{uid}/drawVisible` rewritten — the core's visibility to the renderer (its own flag
+        /// and every ancestor's), sent once the host asked for it.
+        case nodeDrawVisible(index: Int)
         case materialBaseColor(index: Int)
         /// `/lights/{slug}/<channel>` — manifest-owned light
         /// mutation. `id` is the manifest slug (not an integer index);
@@ -124,8 +151,15 @@ final class PointerDispatcher {
         case deformedGeometry(nodeUid: String)
         /// `/materialOverrides/{slug}/<property>` — a timeline / binding write to palette look
         /// `slug`: the resolved look is pulled via `materialParams(slug:)` once per
-        /// tick, whatever property moved, and every instance of it recoloured.
+        /// tick, whatever property moved, and every built-in instance of it recoloured.
         case materialOverride(slug: String)
+        /// `/materialOverrides/{slug}/gltf/{name}` — gltfio parameter `name` of a material a scene
+        /// mesh draws as its glTF material, resolved by the core: set as sent, the one write to
+        /// that mesh's instance.
+        case materialGltf(slug: String, name: String)
+        /// `/materialOverrides/{slug}/gltf/materialKey` — the slug's `MaterialKey` changed: the value
+        /// is the new key, every parameter of it follows in the batch.
+        case materialKey(slug: String)
         case unknown
     }
 
@@ -187,12 +221,8 @@ final class PointerDispatcher {
 
     private let scene: TrideScene
 
-    /// Material index → list of node indices that should receive opacity
-    /// updates when this material's baseColorFactor changes.
-    private(set) var materialIndexToNodeIndices: [Int: [Int]] = [:]
-
-    /// Manifest node UID → glTF node index resolver for canonical
-    /// `/node/{uid}` mutation pointers. Populated by `bind(to:)`.
+    /// Manifest node UID → its place in the scene record (`RecordScene.placeOf`) for canonical
+    /// `/node/{uid}` mutation pointers. Populated by `bind(to:record:)`.
     private var nodeIdToGltfIndex: [String: Int] = [:]
 
     /// Mutation pointer → what it drives. The runtime re-sends the same pointers every tick
@@ -208,10 +238,10 @@ final class PointerDispatcher {
     /// channel (`rotation.x`) so the bridge applies the full vector.
     private var lightDescriptors: [String: TrideLightDescriptor] = [:]
 
-    /// Light / camera slug → glTF node index of its baked carrier node: the one
+    /// Light / camera slug → its carrier place (`RecordScene.carrierPlace`): the one
     /// TransformManager node the entity owns. Spatial channels of a carried entity
     /// are written to that node through the same index-based TRS path mesh nodes
-    /// use; a light without a carrier (older archive) keeps the LightManager overlay path.
+    /// use; a light without a carrier keeps the LightManager overlay path.
     private var carrierIndexById: [String: Int] = [:]
 
     /// Carrier slug → the authored LOCAL pose (`bind(to:)`, from the light / camera descriptor) and
@@ -219,11 +249,8 @@ final class PointerDispatcher {
     private var authoredCarrierPoses: [String: CarrierPose] = [:]
     private(set) var carrierPoses: [String: CarrierPose] = [:]
 
-    /// glTF node index → its rotation as Euler XYZ radians, kept across ticks. A per-axis
-    /// `rotation.{x|y|z}` channel is EULER RADIANS (the editor's convention) and may run
-    /// past a full turn, so the axes cannot be re-derived from the
-    /// quaternion every tick. Seeded once from the node's rest rotation.
-    private var nodeEulerByIndex: [Int: SIMD3<Float>] = [:]
+    /// warn-once latch: a part of a node's rotation reached the host (the core sends it whole).
+    private var nodeRotationPartWarned = false
 
     /// Manifest camera slug → descriptor, cached at `bind(to:)`.
     /// Supplies base values for partial per-axis channels and lens fallbacks.
@@ -240,11 +267,15 @@ final class PointerDispatcher {
     /// bridge applies the full vector. `.zero` when no env / no settings.
     private var environmentBaseEuler: SIMD3<Float> = .zero
 
-    /// glTF node index → the node's OWN visibility (manifest `visible`, then runtime writes)
-    /// and → its parent's index; cached at `bind(to:)`. The drawn visibility is effective —
-    /// the node AND every ancestor — applied parents first (`applyNodeVisibility`).
+    /// Node place → its visibility to the renderer (the core's `drawVisible`: its own flag and every
+    /// ancestor's), cached at `bind(to:record:)` and advanced by the core's writes; a node's own
+    /// `visible` draws nothing by itself.
     private var nodeVisibleOwn: [Int: Bool] = [:]
-    private var nodeParentIndex: [Int: Int] = [:]
+    /// Node place → how the core addresses it on a read (`/node/{uid}`).
+    private var nodeReadPointer: [Int: String] = [:]
+    /// warn-once latch: a glTF material index pointer, which addresses nothing in a scene built from
+    /// the record.
+    private var materialIndexWarned = false
 
     /// Authored background colour (linear RGB), cached at `bind(to:)` from
     /// `scene.backgroundColor()` — seeds the other channels when the runtime emits one
@@ -335,13 +366,6 @@ final class PointerDispatcher {
         let pixelationSize: Float
     }
 
-    /// Build material lookup tables and the node-UID resolver. Transform
-    /// dispatch resolves nodes directly through `FilamentBridge`'s
-    /// canonical node-index map, built at asset load time from
-    /// `getEntities()` + glTF `skins[].joints` + node-name matching
-    /// (official iOS Filament has no `getNodeMap()`). Material opacity uses the same
-    /// index-based dispatch. Canonical `/node/{uid}` mutation pointers
-    /// resolve via `listNodeMetadata()`.
     /// Where problems go besides the log: `TrideKitScene` hands them to the host after the tick.
     var report: (TrideKitDiagnostic) -> Void = { _ in }
 
@@ -352,37 +376,24 @@ final class PointerDispatcher {
         report(TrideKitDiagnostic(kind: kind, subject: subject, message: message, code: code))
     }
 
-    func bind(to bridge: FilamentBridge) {
-        let nodes = readJsonArray(pointer: "/nodes") ?? []
-        let meshes = readJsonArray(pointer: "/meshes") ?? []
-        materialIndexToNodeIndices = Self.collectMaterialBindingsByIndex(
-            fromNodesArray: nodes,
-            meshesArray: meshes
-        )
-
-        // Node UID → glTF index resolver from manifest metadata.
-        nodeIdToGltfIndex = [:]
+    /// `record`: the scene the view built from the core's record — its places address nodes,
+    /// lights and cameras; canonical `/node/{uid}` pointers resolve through its rows.
+    func bind(to bridge: FilamentBridge, record: RecordScene) {
+        self.record = record
         kindByPointer = [:]
         heldMorphWeights = [:]
-        for entry in scene.listNodeMetadata() {
-            nodeIdToGltfIndex[entry.id] = Int(entry.gltfIndex)
-        }
+        lastBonePalettes = [:]
+        // The record's table: a node's place is its row, a carrier's comes after the rows.
+        nodeIdToGltfIndex = record.placeOf
+        carrierIndexById = record.carrierPlace
+        nodeReadPointer = record.uidAt.mapValues { "/node/\($0)" }
 
-        // Carrier table — the baked glTF node that carries each light / camera
-        // (a TransformManager child of its group).
-        carrierIndexById = [:]
-        for entry in scene.listCarrierMetadata() {
-            carrierIndexById[entry.id] = Int(entry.gltfIndex)
-        }
-
-        // Enumerate manifest-owned lights and materialize them
-        // into the bridge (carrier / imported reuse via glTF index, else
-        // editor-created build). Cache descriptors for partial-channel bases.
+        // Enumerate manifest-owned lights and materialize them on their carrier places. Cache
+        // descriptors for partial-channel bases.
         materializeLights(into: bridge)
 
-        // Manifest cameras reuse the gltfio-born Camera component on
-        // their carrier; the authored `scene.activeCamera` seeds the View
-        // (runtime switches arrive as `/scene/active_camera` mutations).
+        // Manifest cameras sit on their carrier places; the authored `scene.activeCamera` seeds the
+        // View (runtime switches arrive as `/scene/active_camera` mutations).
         materializeCameras(into: bridge)
         bridge.setActiveCamera(scene.activeCamera())
 
@@ -398,8 +409,8 @@ final class PointerDispatcher {
         }
         carrierPoses = authoredCarrierPoses
 
-        // Node materials load before any mesh wears them; the asset's slots
-        // of their slugs are dressed here, generated meshes and batches pick them up as they come.
+        // Node materials load before any mesh wears them; generated meshes and batches pick them up
+        // as they come.
         materializeMaterialGraphs(into: bridge)
 
         // Procedural generators are primed by the core at load —
@@ -409,17 +420,9 @@ final class PointerDispatcher {
         // Parametric nodes — the core's mesh of the recipe under the node.
         materializeParametricNodes(into: bridge)
 
-        // Authored visibility (a hidden template / carrier must not draw): own flags + parents,
-        // applied after the generators so what a hidden node hosts is hidden too.
-        nodeVisibleOwn = [:]
-        nodeParentIndex = [:]
-        for entry in scene.listNodeMetadata() {
-            let index = Int(entry.gltfIndex)
-            nodeVisibleOwn[index] = entry.visible
-            if let parent = entry.parentId, let parentIndex = nodeIdToGltfIndex[parent] {
-                nodeParentIndex[index] = parentIndex
-            }
-        }
+        // Authored visibility (a hidden template must not draw) — the core's answer, ancestors
+        // included — applied after the generators so what a hidden node hosts is hidden too.
+        nodeVisibleOwn = record.drawnVisible
         applyNodeVisibility(to: bridge)
 
         // Cache the authored env orientation so per-axis env
@@ -454,31 +457,27 @@ final class PointerDispatcher {
             r: environmentBaseBackground.x, g: environmentBaseBackground.y, b: environmentBaseBackground.z)
 
         logger.notice(
-            "bound dispatcher: materials=\(self.materialIndexToNodeIndices.count) nodes=\(self.nodeIdToGltfIndex.count) lights=\(self.lightDescriptors.count) cameras=\(self.cameraDescriptors.count) carriers=\(self.carrierIndexById.count) activeCamera=\(self.scene.activeCamera() ?? "-", privacy: .public)"
+            "bound dispatcher: nodes=\(self.nodeIdToGltfIndex.count) lights=\(self.lightDescriptors.count) cameras=\(self.cameraDescriptors.count) carriers=\(self.carrierIndexById.count) activeCamera=\(self.scene.activeCamera() ?? "-", privacy: .public)"
         )
     }
 
-    /// Enumerate `scene.listLights()`, cache descriptors keyed by slug, and
-    /// hand the bridge plain ObjC dictionaries (Euler `rotation` pre-resolved
-    /// to a `-Z` emission `direction` here) so it can
-    /// reuse gltfio-born Light components or build editor-created ones.
+    /// Enumerate `scene.listLights()`, cache descriptors keyed by slug, and hand the bridge plain ObjC
+    /// dictionaries (Euler `rotation` pre-resolved to a `-Z` emission `direction` here): each light
+    /// on its carrier place.
     private func materializeLights(into bridge: FilamentBridge) {
         let lights = scene.listLights()
         lightDescriptors = Dictionary(
             lights.map { ($0.id, $0) },
             uniquingKeysWith: { first, _ in first }
         )
-        let dicts = lights.map {
-            Self.lightDictionary(from: $0, carrierGltfIndex: carrierIndexById[$0.id])
-        }
+        let dicts = lights.map { Self.lightDictionary(from: $0, carrierGltfIndex: carrierIndexById[$0.id]) }
         bridge.addLights(dicts)
     }
 
     // Generator slug → hosting node glTF index / palette material.
     private var generatorHostIndex: [String: Int] = [:]
     private var generatorMaterialSlug: [String: String] = [:]
-    /// Palette entry behind the slug — applied by the bridge when the baked asset
-    /// carries no instance for it.
+    /// Palette entry behind the slug — the bridge's built-in instance of it.
     private var generatorMaterialParams: [String: TrideMaterialParams] = [:]
     /// Pulse look per generator whose recipe carries a `pulse` block.
     private var generatorPulseLook: [String: TridePulseLook] = [:]
@@ -516,8 +515,15 @@ final class PointerDispatcher {
     /// the trunk epoch they will hold.
     private var deferredTrunks: [(id: String, trunk: UInt64?)] = []
     private var nextLookRevision: Int64 = 0
-    /// Parametric nodes of the scene, listed once at attach.
+    /// Every node with a datablock, listed once at attach (`RecordScene.datablockNodes`).
     private var parametricNodes: [TrideParametricNode] = []
+    /// The scene the view built from the core's record; `nil` until `bind(to:record:)`.
+    private var record: RecordScene?
+    /// The last bone palette the core handed per mesh row and part (`BonePaletteCheck.key`).
+    private(set) var lastBonePalettes: [UInt64: TrideBonePalette] = [:]
+    /// The joints of each skin part a file mesh was drawn with, by mesh row and part
+    /// (`BonePaletteCheck.key`) — kept from the upload, so the check reads no mesh again.
+    private(set) var skinPartJoints: [UInt64: [UInt32]] = [:]
     /// Imported nodes drawn bent now: their own renderable gives way to the bent mesh.
     private var bentImported: Set<String> = []
 
@@ -601,12 +607,24 @@ final class PointerDispatcher {
         }
     }
 
+    /// The core's code of a node material's package that did not load.
+    static let packageRefusedCode = "material.package-refused"
+
+    /// What is told of a package the core accepted and this device refused (its version or backend,
+    /// or `Material::Builder`): the core's `MaterialPackageProblem::Refused` text
+    /// (`material_graphs.rs`), which no FFI call hands out for a package the core accepted;
+    /// `MaterialPackageWordsTests` holds the two equal.
+    static func hostRefusedMessage(slug: String) -> String {
+        "This scene's material '\(slug)' could not be loaded on this device and is drawn plainly. Open the scene in the Tride editor of this version and save it again."
+    }
+
     /// Load every node material's packages — checked against the bridge's
     /// own Filament first (a foreign package aborts in `Material::Builder`) — with their texture
-    /// arrays and current uniforms, then dress the asset's slots that wear them. A missing or
-    /// refused package leaves the slug on the built-in path; the core's problems
-    /// (`materialGraphProblems`: stale / version records and a package the archive does not hold,
-    /// `material.package-missing`) are told once per material and code, in its words.
+    /// arrays and current uniforms. Without a loaded package a file mesh draws the record's glTF
+    /// form (written by the core), generated meshes and batches the built-in look.
+    /// The core's problems (`materialGraphProblems`: stale / version records, a package the archive
+    /// does not hold or the core refused) and the packages this device refused
+    /// (`material.package-refused`, `hostRefusedMessage`) are told once per material and code.
     private func materializeMaterialGraphs(into bridge: FilamentBridge) {
         materialGraphFamilies = [:]
         sentUniforms.removeAll()
@@ -617,14 +635,24 @@ final class PointerDispatcher {
         for told in scene.materialGraphProblems() where toldRecords.insert("\(told.slug)\u{0}\(told.code)").inserted {
             problem(.load, told.slug, told.message, code: told.code)
         }
+        let refused = { (slug: String) in
+            guard toldRecords.insert("\(slug)\u{0}\(Self.packageRefusedCode)").inserted else { return }
+            self.problem(.load, slug, Self.hostRefusedMessage(slug: slug), code: Self.packageRefusedCode)
+        }
         let slugs = scene.materialGraphSlugs()
         guard !slugs.isEmpty else { return }
-        let engineVersion = bridge.referenceMaterialPackage.flatMap { materialPackageInfo(bytes: $0) }?.version
+        // A bridge without its own package draws nothing (a host that does not render): no package
+        // of the scene is refused by it.
+        guard let engineVersion = bridge.referenceMaterialPackage.flatMap({ materialPackageInfo(bytes: $0) })?.version
+        else {
+            logger.error("node materials: the bridge carries no built-in package to check against — none loaded")
+            return
+        }
         var precompiled = 0
         for slug in slugs {
             for family in ["mesh", "generated", "instanced"] {
                 guard let graph = scene.materialGraph(slug: slug, family: family) else { continue }
-                // A package the archive does not hold is the core's problem, told above.
+                // A package the archive does not hold, or one the core refused, is the core's problem.
                 guard let shipped = scene.assetBytes(uri: graph.packageUri) else { continue }
                 var package = shipped
                 do {
@@ -638,7 +666,9 @@ final class PointerDispatcher {
                 guard let info = materialPackageInfo(bytes: package), info.version == engineVersion,
                       info.backends.contains("metal")
                 else {
-                    problem(.load, slug, "node material (\(family)): package for another Filament or without Metal — built-in look")
+                    logger.error(
+                        "node material '\(slug, privacy: .public)' (\(family, privacy: .public)): package version \(String(describing: materialPackageInfo(bytes: package)?.version), privacy: .public) for engine \(engineVersion, privacy: .public), or without Metal")
+                    refused(slug)
                     continue
                 }
                 let arrays: [[String: Any]] = graph.groups.map { group in
@@ -660,7 +690,10 @@ final class PointerDispatcher {
                 guard bridge.registerMaterialGraph(
                     slug, family: family, package: package, arrays: arrays, params: params,
                     instanceColors: graph.instanceColors, castShadows: graph.castShadows)
-                else { continue }
+                else {
+                    refused(slug)
+                    continue
+                }
                 materialGraphFamilies[slug, default: []].append(family)
                 if family == "instanced" && graph.instanceColors { instanceRowSlugs.insert(slug) }
                 pushMaterialGraphValues(slug: slug, family: family, into: bridge)
@@ -673,13 +706,8 @@ final class PointerDispatcher {
                 }
             }
         }
-        var seeds: [NSNumber: NSNumber] = [:]
-        for (uid, index) in nodeIdToGltfIndex {
-            seeds[NSNumber(value: index)] = NSNumber(value: materialObjectSeed(uid: uid))
-        }
-        let dressed = bridge.dressAssetWithMaterialGraphs(objectSeeds: seeds)
         logger.notice(
-            "node materials: \(self.materialGraphFamilies.count) of \(slugs.count) loaded (\(precompiled) package(s) precompiled), \(dressed) asset slot(s) dressed")
+            "node materials: \(self.materialGraphFamilies.count) of \(slugs.count) loaded (\(precompiled) package(s) precompiled)")
     }
 
     /// The core's uniforms of `slug` on `family` at the scene's current values that moved since the
@@ -741,8 +769,13 @@ final class PointerDispatcher {
     /// from the recipe — through the generated-mesh path, under the node's own entity, in the
     /// core's look (the palette entry, else the core's default look, white plastic).
     private func materializeParametricNodes(into bridge: FilamentBridge) {
-        parametricNodes = scene.listParametricNodes()
+        // Every node that draws a datablock, the core's mesh under the node; a file mesh wears the
+        // record's materials.
+        guard let record else { return }
+        bridge.setStandardMaterials(standardForms(of: record.materials))
+        parametricNodes = record.datablockNodes
         bentImported = []
+        skinPartJoints = [:]
         for node in parametricNodes {
             uploadParametricNode(node, into: bridge)
         }
@@ -766,7 +799,7 @@ final class PointerDispatcher {
             return
         }
         guard let parent = nodeIdToGltfIndex[uid] else {
-            problem(.load, uid, "bent node has no glTF node — not drawn")
+            problem(.load, uid, "bent node is no place of the scene — not drawn")
             return
         }
         let id = "parametric:\(uid)"
@@ -857,7 +890,7 @@ final class PointerDispatcher {
 
     private func uploadParametricNode(_ node: TrideParametricNode, into bridge: FilamentBridge) {
         guard let parent = nodeIdToGltfIndex[node.nodeUid] else {
-            problem(.load, node.nodeUid, "parametric node has no glTF node — not drawn")
+            problem(.load, node.nodeUid, "parametric node is no place of the scene — not drawn")
             return
         }
         // A node a deformer reaches draws its bent mesh, else its recipe's.
@@ -871,7 +904,8 @@ final class PointerDispatcher {
         }
     }
 
-    /// One core mesh drawn as generated mesh `id` under glTF node `parent`, in the mesh's look.
+    /// One core mesh drawn as generated mesh `id` under place `parent`, in the mesh's look —
+    /// or, a file mesh (`fileMeshDictionary`), as gltfio draws its primitives.
     private func upload(
         mesh: TrideDatablockMesh, id: String, parent: Int, objectUid: String, into bridge: FilamentBridge
     ) -> Bool {
@@ -888,8 +922,277 @@ final class PointerDispatcher {
             objectUid: objectUid,
             assetBytes: cachedAssetBytes
         )
-        return bridge.upsertGeneratedMesh(id, geometry: dict)
+        guard let record, Self.isFileMesh(mesh) else { return bridge.upsertGeneratedMesh(id, geometry: dict) }
+        var file = Self.fileMeshDictionary(dict, mesh: mesh, assetBytes: cachedAssetBytes)
+        if !mesh.morphTargets.isEmpty {
+            // The weights it starts at: the last the stream set, else the node's at rest.
+            let weights = heldMorphWeights[parent] ?? (record.restWeights[objectUid] ?? []).map(Float.init)
+            file["morphWeights"] = weights.map { NSNumber(value: $0) }
+        }
+        // A node with a skin: its joints (at most Filament's 256) bend the mesh as a whole skin;
+        // a skin cut into parts names its own (`skinParts`). The palettes come per tick.
+        if let skin = record.skinOf[objectUid] {
+            file["skinBones"] = NSNumber(value: min(record.skins[skin].joints.count, 256))
+            for part in mesh.skinParts + mesh.parts.flatMap(\.skinParts) {
+                skinPartJoints[BonePaletteCheck.key(mesh: UInt32(parent), part: part.part)] = part.joints
+            }
+        }
+        return bridge.upsertGeneratedMesh(id, geometry: file)
     }
+
+    /// A file mesh names what its primitives carry in the file — on the mesh without groups, else on
+    /// every group, and on every part; a mesh of parts alone, on its parts. A mesh the core built
+    /// (procedural) names nothing — the web's `filePrimitives`.
+    static func isFileMesh(_ mesh: TrideDatablockMesh) -> Bool {
+        guard mesh.parts.allSatisfy({ $0.attributes != nil }) else { return false }
+        if mesh.positions.isEmpty, mesh.attributes == nil { return !mesh.parts.isEmpty }
+        guard mesh.attributes != nil else { return false }
+        return mesh.groups.allSatisfy { $0.attributes != nil }
+    }
+
+    /// `dict` (a mesh's `geometryDictionary`) as a file mesh: `meshFamily`, the key and
+    /// attributes of each group — or of the mesh without groups — `uvs1`, `colors`, `bounds`, the
+    /// `morphTargets`, the influences (`joints`, `weights`, `skinParts`) and the `parts` (points,
+    /// lines, strips), each with its own streams, look, key, attributes, bounds, morph targets and
+    /// influences.
+    static func fileMeshDictionary(
+        _ dict: [String: Any], mesh: TrideDatablockMesh, assetBytes: (String) -> Data? = { _ in nil }
+    ) -> [String: Any] {
+        var out = dict
+        out["meshFamily"] = true
+        if let key = mesh.materialKey { out["materialKey"] = materialKeyDictionary(key) }
+        if let attributes = mesh.attributes { out["attributes"] = attributesDictionary(attributes) }
+        if let uvs1 = mesh.uvs1, !uvs1.isEmpty { out["uvs1"] = uvs1 }
+        if !mesh.colors.isEmpty { out["colors"] = mesh.colors }
+        if let bounds = mesh.bounds { out["bounds"] = boundsDictionary(bounds) }
+        if !mesh.morphTargets.isEmpty { out["morphTargets"] = mesh.morphTargets.map(morphTargetDictionary) }
+        out.merge(skinDictionary(joints: mesh.joints, weights: mesh.weights, parts: mesh.skinParts)) { _, new in new }
+        if let stored = mesh.stored { out["stored"] = storedDictionary(stored) }
+        if !mesh.parts.isEmpty {
+            out["parts"] = mesh.parts.map { part -> [String: Any] in
+                var entry: [String: Any] = [
+                    "topology": part.topology, "positions": part.positions, "normals": part.normals,
+                    "uvs": part.uvs, "colors": part.colors, "tangents": part.tangents, "indices": part.indices,
+                    "materialKey": materialKeyDictionary(part.materialKey),
+                ]
+                if let uvs1 = part.uvs1, !uvs1.isEmpty { entry["uvs1"] = uvs1 }
+                if let slug = part.material { entry["materialSlug"] = slug }
+                if let p = part.materialParams {
+                    entry["materialParams"] = materialParamsDictionary(p, assetBytes: assetBytes)
+                }
+                if let attributes = part.attributes { entry["attributes"] = attributesDictionary(attributes) }
+                if let bounds = part.bounds { entry["bounds"] = boundsDictionary(bounds) }
+                if !part.morphTargets.isEmpty { entry["morphTargets"] = part.morphTargets.map(morphTargetDictionary) }
+                entry.merge(skinDictionary(joints: part.joints, weights: part.weights, parts: part.skinParts)) { _, new in new }
+                if let stored = part.stored { entry["stored"] = storedDictionary(stored) }
+                return entry
+            }
+        }
+        if var groups = out["groups"] as? [[String: Any]], groups.count == mesh.groups.count {
+            for (i, group) in mesh.groups.enumerated() {
+                if let key = group.materialKey { groups[i]["materialKey"] = materialKeyDictionary(key) }
+                if let attributes = group.attributes { groups[i]["attributes"] = attributesDictionary(attributes) }
+            }
+            out["groups"] = groups
+        }
+        return out
+    }
+
+    /// One write of the glTF stream (`/materialOverrides/{slug}/gltf/…`), kept in batch order: a
+    /// parameter the core resolved, or the slug's new key (gltfio's field names).
+    enum GltfWrite {
+        case param(slug: String, name: String, values: [Float])
+        case key(slug: String, key: [String: Any])
+        /// A cut-off or double side: Filament's instance state `name` (`_maskThreshold` /
+        /// `_doubleSided`, 1 = on).
+        case state(slug: String, name: String, value: Float)
+    }
+
+    /// The instance state a palette material leaf sets (`alphaCutoff`, `doubleSided`), `nil` for any other.
+    static func instanceState(of pointer: String) -> String? {
+        let segs = pointer.split(separator: "/", omittingEmptySubsequences: false)
+        guard segs.count == 4, segs[1] == "materialOverrides" else { return nil }
+        switch segs[3] {
+        case "alphaCutoff": return "_maskThreshold"
+        case "doubleSided": return "_doubleSided"
+        default: return nil
+        }
+    }
+
+    /// The key fields `gltf/materialKey` carries that are switches, by the core's names (= the FFI's).
+    private static let keyFlags: Set<String> = [
+        "doubleSided", "unlit", "hasBaseColorTexture", "hasNormalTexture", "hasOcclusionTexture",
+        "hasEmissiveTexture", "useSpecularGlossiness", "enableDiagnostics", "hasMetallicRoughnessTexture",
+        "hasClearCoatTexture", "hasClearCoatRoughnessTexture", "hasClearCoatNormalTexture", "hasClearCoat",
+        "hasTransmission", "hasTextureTransforms", "hasTransmissionTexture", "hasSheenColorTexture",
+        "hasSheenRoughnessTexture", "hasVolumeThicknessTexture", "hasSheen", "hasIor", "hasVolume",
+        "hasDispersion", "hasSpecular", "hasSpecularTexture", "hasSpecularColorTexture",
+    ]
+    /// The key fields that are UV sets.
+    private static let keySets: Set<String> = [
+        "metallicRoughnessUv", "baseColorUv", "clearCoatUv", "clearCoatRoughnessUv", "clearCoatNormalUv",
+        "emissiveUv", "aoUv", "normalUv", "transmissionUv", "sheenColorUv", "sheenRoughnessUv",
+        "volumeThicknessUv", "specularTextureUv", "specularColorTextureUv",
+    ]
+
+    /// The key a `gltf/materialKey` value names: a JSON object of the FFI key's fields (the core's
+    /// serde names are its uniffi names), the alpha mode `opaque` / `mask` / `blend`; a field it
+    /// leaves out is gltfio's default (off, set 0), `hasVertexColors` is off (each draw group keeps
+    /// its own). `nil` for another shape, an unknown field or a value of the wrong kind.
+    static func materialKey(from value: TrideTypedValue) -> TrideMaterialKey? {
+        guard case .json(let raw) = value,
+              let object = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any]
+        else { return nil }
+        var flags: [String: Bool] = [:]
+        var sets: [String: UInt8] = [:]
+        var alphaMode = "opaque"
+        for (name, v) in object {
+            let number = v as? NSNumber
+            let isBool = number.map { CFGetTypeID($0) == CFBooleanGetTypeID() } ?? false
+            if name == "alphaMode" {
+                guard let mode = v as? String, ["opaque", "mask", "blend"].contains(mode) else { return nil }
+                alphaMode = mode
+            } else if keyFlags.contains(name) {
+                guard let number, isBool else { return nil }
+                flags[name] = number.boolValue
+            } else if keySets.contains(name) {
+                guard let number, !isBool, let set = UInt8(exactly: number.doubleValue) else { return nil }
+                sets[name] = set
+            } else {
+                return nil
+            }
+        }
+        func f(_ name: String) -> Bool { flags[name] ?? false }
+        func u(_ name: String) -> UInt8 { sets[name] ?? 0 }
+        return TrideMaterialKey(
+            doubleSided: f("doubleSided"), unlit: f("unlit"), hasVertexColors: false,
+            hasBaseColorTexture: f("hasBaseColorTexture"), hasNormalTexture: f("hasNormalTexture"),
+            hasOcclusionTexture: f("hasOcclusionTexture"), hasEmissiveTexture: f("hasEmissiveTexture"),
+            useSpecularGlossiness: f("useSpecularGlossiness"), alphaMode: alphaMode,
+            enableDiagnostics: f("enableDiagnostics"), hasMetallicRoughnessTexture: f("hasMetallicRoughnessTexture"),
+            metallicRoughnessUv: u("metallicRoughnessUv"), baseColorUv: u("baseColorUv"),
+            hasClearCoatTexture: f("hasClearCoatTexture"), clearCoatUv: u("clearCoatUv"),
+            hasClearCoatRoughnessTexture: f("hasClearCoatRoughnessTexture"), clearCoatRoughnessUv: u("clearCoatRoughnessUv"),
+            hasClearCoatNormalTexture: f("hasClearCoatNormalTexture"), clearCoatNormalUv: u("clearCoatNormalUv"),
+            hasClearCoat: f("hasClearCoat"), hasTransmission: f("hasTransmission"),
+            hasTextureTransforms: f("hasTextureTransforms"), emissiveUv: u("emissiveUv"), aoUv: u("aoUv"),
+            normalUv: u("normalUv"), hasTransmissionTexture: f("hasTransmissionTexture"),
+            transmissionUv: u("transmissionUv"), hasSheenColorTexture: f("hasSheenColorTexture"),
+            sheenColorUv: u("sheenColorUv"), hasSheenRoughnessTexture: f("hasSheenRoughnessTexture"),
+            sheenRoughnessUv: u("sheenRoughnessUv"), hasVolumeThicknessTexture: f("hasVolumeThicknessTexture"),
+            volumeThicknessUv: u("volumeThicknessUv"), hasSheen: f("hasSheen"), hasIor: f("hasIor"),
+            hasVolume: f("hasVolume"), hasDispersion: f("hasDispersion"), hasSpecular: f("hasSpecular"),
+            hasSpecularTexture: f("hasSpecularTexture"), hasSpecularColorTexture: f("hasSpecularColorTexture"),
+            specularTextureUv: u("specularTextureUv"), specularColorTextureUv: u("specularColorTextureUv"))
+    }
+
+    /// gltfio's `MaterialKey` field names (`FilamentBridge` builds the C++ key from them).
+    static func materialKeyDictionary(_ k: TrideMaterialKey) -> [String: Any] {
+        [
+            "doubleSided": k.doubleSided, "unlit": k.unlit, "hasVertexColors": k.hasVertexColors,
+            "hasBaseColorTexture": k.hasBaseColorTexture, "hasNormalTexture": k.hasNormalTexture,
+            "hasOcclusionTexture": k.hasOcclusionTexture, "hasEmissiveTexture": k.hasEmissiveTexture,
+            "useSpecularGlossiness": k.useSpecularGlossiness, "alphaMode": k.alphaMode,
+            "hasMetallicRoughnessTexture": k.hasMetallicRoughnessTexture,
+            "metallicRoughnessUV": k.metallicRoughnessUv, "baseColorUV": k.baseColorUv,
+            "hasClearCoatTexture": k.hasClearCoatTexture, "clearCoatUV": k.clearCoatUv,
+            "hasClearCoatRoughnessTexture": k.hasClearCoatRoughnessTexture,
+            "clearCoatRoughnessUV": k.clearCoatRoughnessUv,
+            "hasClearCoatNormalTexture": k.hasClearCoatNormalTexture, "clearCoatNormalUV": k.clearCoatNormalUv,
+            "hasClearCoat": k.hasClearCoat, "hasTransmission": k.hasTransmission,
+            "hasTextureTransforms": k.hasTextureTransforms, "emissiveUV": k.emissiveUv, "aoUV": k.aoUv,
+            "normalUV": k.normalUv, "hasTransmissionTexture": k.hasTransmissionTexture,
+            "transmissionUV": k.transmissionUv, "hasSheenColorTexture": k.hasSheenColorTexture,
+            "sheenColorUV": k.sheenColorUv, "hasSheenRoughnessTexture": k.hasSheenRoughnessTexture,
+            "sheenRoughnessUV": k.sheenRoughnessUv, "hasVolumeThicknessTexture": k.hasVolumeThicknessTexture,
+            "volumeThicknessUV": k.volumeThicknessUv, "hasSheen": k.hasSheen, "hasIOR": k.hasIor,
+            "hasVolume": k.hasVolume, "hasDispersion": k.hasDispersion, "hasSpecular": k.hasSpecular,
+            "hasSpecularTexture": k.hasSpecularTexture, "hasSpecularColorTexture": k.hasSpecularColorTexture,
+            "specularTextureUV": k.specularTextureUv, "specularColorTextureUV": k.specularColorTextureUv,
+        ]
+    }
+
+    /// A box as the bridge takes it: `{min, max}`.
+    /// A file primitive's influences for the bridge: `joints` / `weights` (set 0, as the core decoded
+    /// and normalized them) when it has any, and its `skinParts` (`{ part, group, indexStart,
+    /// indexCount, bones }`) when the skin is cut past 256 joints.
+    static func skinDictionary(joints: Data?, weights: Data?, parts: [TrideSkinPart]) -> [String: Any] {
+        var out: [String: Any] = [:]
+        if let joints, let weights, !joints.isEmpty, !weights.isEmpty {
+            out["joints"] = joints
+            out["weights"] = weights
+        }
+        if !parts.isEmpty {
+            out["skinParts"] = parts.map { p -> [String: Any] in
+                [
+                    "part": NSNumber(value: p.part), "group": NSNumber(value: p.group),
+                    "indexStart": NSNumber(value: p.indexStart), "indexCount": NSNumber(value: p.indexCount),
+                    "bones": NSNumber(value: p.joints.count),
+                ]
+            }
+        }
+        return out
+    }
+
+    /// A primitive's quantized streams as the file stores them for the bridge:
+    /// `{ positions?, uvs?, uvs1?, colors?, weights? }`, each `{ component, normalized, components,
+    /// stride, bytes }` — uploaded in its stored type, as gltfio uploads it.
+    static func storedDictionary(_ s: TrideStoredStreams) -> [String: Any] {
+        var out: [String: Any] = [:]
+        for (key, stream) in [
+            ("positions", s.positions), ("uvs", s.uvs), ("uvs1", s.uvs1), ("colors", s.colors),
+            ("weights", s.weights),
+        ] {
+            guard let stream else { continue }
+            out[key] = [
+                "component": stream.component, "normalized": stream.normalized,
+                "components": NSNumber(value: stream.components), "stride": NSNumber(value: stream.stride),
+                "bytes": stream.bytes,
+            ] as [String: Any]
+        }
+        return out
+    }
+
+    static func boundsDictionary(_ b: TrideBounds) -> [String: Any] {
+        ["min": b.min.map { NSNumber(value: $0) }, "max": b.max.map { NSNumber(value: $0) }]
+    }
+
+    /// One morph target's deltas (float32 `xyz` per vertex; empty = the stream is not moved).
+    static func morphTargetDictionary(_ t: TrideMorphTarget) -> [String: Any] {
+        ["positions": t.positions, "normals": t.normals, "tangents": t.tangents]
+    }
+
+    /// What a primitive carries in its file.
+    static func attributesDictionary(_ a: TrideVertexAttributes) -> [String: Any] {
+        ["normals": a.normals, "uv0": a.uv0, "tangents": a.tangents, "colors": a.colors]
+    }
+
+    /// The record's glTF forms (a standard-form material's look, a graph's fallback on a file mesh)
+    /// as `FilamentBridge.setStandardMaterials` takes them: parameters by gltfio's names, each map's
+    /// picture (its bytes) in its slot's colour space.
+    private func standardForms(of materials: [TrideRecordMaterial]) -> [String: [String: Any]] {
+        var out: [String: [String: Any]] = [:]
+        for material in materials {
+            guard let form = material.standard else { continue }
+            var dict: [String: Any] = [
+                "params": form.params.map { ["name": $0.name, "value": $0.value.map { NSNumber(value: $0) }] },
+                "alphaMode": form.alphaMode,
+            ]
+            if let cutoff = form.alphaCutoff { dict["alphaCutoff"] = NSNumber(value: cutoff) }
+            dict["maps"] = form.maps.compactMap { map -> [String: Any]? in
+                guard let bytes = cachedAssetBytes(map.texture.uri) else {
+                    problem(.load, material.slug, "its \(map.slot) picture '\(map.texture.uri)' is not in the scene — the map is left out")
+                    return nil
+                }
+                var ref = Self.textureRefDictionary(map.texture, bytes: bytes)
+                ref["srgb"] = map.srgb
+                return ["slot": map.slot, "texture": ref]
+            }
+            out[material.slug] = dict
+        }
+        return out
+    }
+
 
     /// Draw the datablock-bound module symbols of `id` as
     /// instanced batches — the mesh is decoded by the core once per datablock (`datablockMesh`),
@@ -948,7 +1251,7 @@ final class PointerDispatcher {
         return dict
     }
 
-    /// Pull palette look `slug` as the scene draws it now and recolour every instance
+    /// Pull palette look `slug` as the scene draws it now and recolour every built-in instance
     /// of it; the caches later uploads read from take the new look too, so a re-grown trunk or a
     /// re-synced batch never falls back to the authored colours. `lookWritten` = the tick wrote a
     /// leaf other than a node-graph input: without it the look cannot have moved and is not pulled.
@@ -990,8 +1293,8 @@ final class PointerDispatcher {
         logger.debug("palette '\(slug, privacy: .public)': \(touched) instance(s) recoloured")
     }
 
-    /// Look fields of glTF glass (transmission, IOR, volume, dispersion) the look this kit
-    /// recolours from does not carry: the web animates them, iOS keeps the saved value.
+    /// Look fields of glTF glass (transmission, IOR, volume, dispersion) the built-in look this kit
+    /// recolours from does not carry; a file mesh takes them from the core's `/gltf/*` parameters.
     static let glassFields: Set<String> = [
         "transmission", "ior", "thickness", "attenuationColor", "attenuationDistance", "dispersion",
     ]
@@ -1014,12 +1317,14 @@ final class PointerDispatcher {
     }
 
     private var glassWarned: Set<String> = []
+    /// `slug/name` of live glTF parameters no instance took — said once each.
+    private var gltfMissWarned: Set<String> = []
     private func warnGlassOnce(slug: String, field: String) {
         let subject = "/materialOverrides/\(slug)/\(field)"
         guard glassWarned.insert(subject).inserted else { return }
         problem(
             .pointer, subject,
-            "material '\(slug)': its glass \(field) does not animate on iOS yet — it keeps the value saved in the scene")
+            "material '\(slug)': its glass \(field) does not animate in the built-in look of generated meshes and batches on iOS — they keep the value saved in the scene; a file mesh takes it from the core's glTF parameters")
     }
 
     private var unknownPaletteWarned: Set<String> = []
@@ -1061,7 +1366,9 @@ final class PointerDispatcher {
         // `mask` cuts at `alphaCutoff` (a leaf texture's alpha shapes the blade).
         if let mode = p.alphaMode { dict["alphaMode"] = mode }
         if let cutoff = p.alphaCutoff { dict["alphaCutoff"] = NSNumber(value: cutoff) }
-        // The thin-surface look — the bridge picks the family from these.
+        // The thin-surface look: the core says which family draws it (its `thin` field) and
+        // hands only what that family draws.
+        dict["thin"] = NSNumber(value: p.thin)
         if let dt = p.diffuseTransmission { dict["diffuseTransmission"] = NSNumber(value: dt) }
         if let c = p.diffuseTransmissionColor {
             dict["diffuseTransmissionColor"] = c.map { NSNumber(value: $0) }
@@ -1222,8 +1529,8 @@ final class PointerDispatcher {
 
 
     /// Enumerate `scene.listCameras()`, cache descriptors keyed by slug, and
-    /// hand the bridge plain ObjC dictionaries. Each camera's pose lives on its
-    /// baked carrier node; the bridge reuses the gltfio-born Camera component there.
+    /// hand the bridge plain ObjC dictionaries. Each camera's pose lives on its carrier place; the
+    /// bridge builds the Camera component there.
     private func materializeCameras(into bridge: FilamentBridge) {
         let cameras = scene.listCameras()
         cameraDescriptors = Dictionary(
@@ -1284,9 +1591,8 @@ final class PointerDispatcher {
         if let outer = light.outerConeAngle { dict["outerConeAngle"] = outer }
         if let cast = light.castShadows { dict["castShadows"] = cast }
         if let position = light.position { dict["position"] = position }
-        if let gltfIndex = light.gltfIndex { dict["gltfIndex"] = gltfIndex }
-        // The baked carrier node — the bridge reuses its gltfio-born Light
-        // component and leaves the pose to the TransformManager.
+        // The carrier place — the bridge builds the Light component on it and leaves the pose to
+        // the TransformManager.
         if let idx = carrierGltfIndex { dict["carrierGltfIndex"] = idx }
         let direction = Self.lightForwardDirection(eulerXYZ: light.rotation)
         dict["direction"] = [direction.x, direction.y, direction.z]
@@ -1310,10 +1616,8 @@ final class PointerDispatcher {
     ///
     /// Transform dispatch uses **index-based** bridge calls
     /// (`setNodeRotation(atIndex:…)`, `setNodeScale(atIndex:…)`,
-    /// `setNodeTranslation(atIndex:…)`), resolved through the bridge's node-index
-    /// map (glTF `nodes[]` order, built from skin joints + name matching). This
-    /// correctly handles duplicate glTF node names (e.g. nine petals sharing one
-    /// name at different glTF indices).
+    /// `setNodeTranslation(atIndex:…)`), addressed by the node's place in the scene record
+    /// (`nodeIdToGltfIndex`, by uid): nodes sharing a name are told apart.
     ///
     /// `complete`: the batch is the core's whole frame (the first after a reset) — an animated
     /// render setting it does not carry returns to the scene's own value.
@@ -1364,6 +1668,9 @@ final class PointerDispatcher {
         // Palette looks a timeline / binding wrote this tick (ordered, deduped), and those written
         // in a leaf other than a node-graph input.
         var dirtyPalettes: [String] = []
+        var gltfWrites: [GltfWrite] = []
+        // Glass leaves written this tick: a problem only where the built-in look draws the slug.
+        var glassWrites: [(slug: String, field: String)] = []
         var writtenLooks: Set<String> = []
         // Generators whose pulse table was announced this tick.
         var dirtyFlows: [String] = []
@@ -1377,8 +1684,6 @@ final class PointerDispatcher {
                 dirtyRotations.insert(i)
                 if let q = Self.extractQuaternion(from: mutation.typedValue) {
                     rotationValues[i] = q
-                    // The last write wins: the cached Euler lanes no longer describe the node.
-                    nodeEulerByIndex[i] = nil
                 }
             case .nodeScale(let i):
                 dirtyScales.insert(i)
@@ -1393,35 +1698,25 @@ final class PointerDispatcher {
             case .nodeTranslationComponent(let i, let c):
                 dirtyTranslations.insert(i)
                 if let s = Self.extractScalar(from: mutation.typedValue) {
-                    var current = translationValues[i] ?? readVec3(pointer: "/nodes/\(i)/translation") ?? .zero
+                    var current = translationValues[i] ?? readNodeVec3(i, "/translation") ?? .zero
                     current[c] = Float(s)
                     translationValues[i] = current
                 }
             case .nodeScaleComponent(let i, let c):
                 dirtyScales.insert(i)
                 if let s = Self.extractScalar(from: mutation.typedValue) {
-                    var current = scaleValues[i] ?? readVec3(pointer: "/nodes/\(i)/scale") ?? SIMD3<Float>(1, 1, 1)
+                    var current = scaleValues[i] ?? readNodeVec3(i, "/scale") ?? SIMD3<Float>(1, 1, 1)
                     current[c] = Float(s)
                     scaleValues[i] = current
                 }
-            case .nodeRotationComponent(let i, let c):
+            case .nodeRotationComponent(let i, _):
+                // The core sends a node's rotation whole, as it composed it: no
+                // axis is composed here. A part is not the core's form — the node takes the
+                // core's own quaternion (`readRotationQuaternion`, below) and the host hears once.
                 dirtyRotations.insert(i)
-                if let s = Self.extractScalar(from: mutation.typedValue) {
-                    if c < 3 {
-                        var euler = nodeEulerByIndex[i]
-                            ?? readRotationQuaternion(forNodeIndex: i).map(Self.eulerXYZ(from:))
-                            ?? .zero
-                        euler[c] = Float(s)
-                        nodeEulerByIndex[i] = euler
-                        rotationValues[i] = Self.eulerXYZQuaternion(euler)
-                    } else {
-                        // `rotation.w` has no Euler meaning: the raw quaternion component.
-                        let base = rotationValues[i] ?? readRotationQuaternion(forNodeIndex: i) ?? simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
-                        var components = simd_float4(base.imag.x, base.imag.y, base.imag.z, base.real)
-                        components[c] = Float(s)
-                        rotationValues[i] = simd_quatf(ix: components[0], iy: components[1], iz: components[2], r: components[3])
-                        nodeEulerByIndex[i] = nil
-                    }
+                if !nodeRotationPartWarned {
+                    nodeRotationPartWarned = true
+                    logger.warning("rotation: '\(mutation.pointer, privacy: .public)' is a part of a node's rotation — the core sends it whole; the core's quaternion is used")
                 }
             case .nodeMorphWeight(let ni, let wi):
                 if let s = Self.extractScalar(from: mutation.typedValue) {
@@ -1430,7 +1725,10 @@ final class PointerDispatcher {
                     let v = readScalar(pointer: mutation.pointer) ?? 0
                     morphWeights[ni, default: [:]][wi] = v
                 }
-            case .nodeVisible(let i):
+            case .nodeVisible:
+                // A node's own flag draws nothing by itself: the core's `drawVisible` carries it.
+                break
+            case .nodeDrawVisible(let i):
                 if case .boolValue(let visible) = mutation.typedValue {
                     nodeVisibleOwn[i] = visible
                     visibilityDirty = true
@@ -1539,10 +1837,36 @@ final class PointerDispatcher {
                 if !dirtyDatablocks.contains(uid) { dirtyDatablocks.append(uid) }
             case .deformedGeometry(let uid):
                 if !dirtyDeformed.contains(uid) { dirtyDeformed.append(uid) }
+            case .materialGltf(let slug, let name):
+                guard let values = Self.extractNumbers(from: mutation.typedValue),
+                      [1, 3, 4, 9].contains(values.count) else {
+                    valueShapeProblem(mutation, "a number, 3, 4 or 9 numbers")
+                    continue
+                }
+                gltfWrites.append(.param(slug: slug, name: name, values: values))
+            case .materialKey(let slug):
+                guard let key = Self.materialKey(from: mutation.typedValue) else {
+                    valueShapeProblem(mutation, "a material key object")
+                    continue
+                }
+                gltfWrites.append(.key(slug: slug, key: Self.materialKeyDictionary(key)))
             case .materialOverride(let slug):
                 if !dirtyPalettes.contains(slug) { dirtyPalettes.append(slug) }
                 if complete || !Self.isGraphLeaf(mutation.pointer) { writtenLooks.insert(slug) }
-                if let field = Self.glassField(of: mutation.pointer) { warnGlassOnce(slug: slug, field: field) }
+                if let field = Self.glassField(of: mutation.pointer) { glassWrites.append((slug, field)) }
+                if let state = Self.instanceState(of: mutation.pointer) {
+                    let value: Float?
+                    switch (state, mutation.typedValue) {
+                    case ("_maskThreshold", .scalar(let v)): value = Float(v)
+                    case ("_doubleSided", .boolValue(let on)): value = on ? 1 : 0
+                    default: value = nil
+                    }
+                    if let value {
+                        gltfWrites.append(.state(slug: slug, name: state, value: value))
+                    } else {
+                        valueShapeProblem(mutation, state == "_maskThreshold" ? "a number" : "true or false")
+                    }
+                }
             case .unknown:
                 // The core also writes pointers it consumes itself (generator / effector parameters —
                 // it re-evaluates and announces geometry); only a pointer in a domain the view draws,
@@ -1569,7 +1893,7 @@ final class PointerDispatcher {
             var s = SIMD3<Float>(1, 1, 1)
 
             if dirtyTranslations.contains(i) {
-                if let tv = translationValues[i] ?? readVec3(pointer: "/nodes/\(i)/translation") {
+                if let tv = translationValues[i] ?? readNodeVec3(i, "/translation") {
                     t = tv
                     mask.insert(.translation)
                 }
@@ -1581,7 +1905,7 @@ final class PointerDispatcher {
                 }
             }
             if dirtyScales.contains(i) {
-                if let sv = scaleValues[i] ?? readVec3(pointer: "/nodes/\(i)/scale") {
+                if let sv = scaleValues[i] ?? readNodeVec3(i, "/scale") {
                     s = sv
                     mask.insert(.scale)
                 }
@@ -1607,24 +1931,22 @@ final class PointerDispatcher {
             bridge.setNodeRotation(atIndex: Int(i), quaternion: simd_float4(q.imag.x, q.imag.y, q.imag.z, q.real))
         }
         for i in dirtyScales.subtracting(multiDirty) {
-            guard let s = scaleValues[i] ?? readVec3(pointer: "/nodes/\(i)/scale") else {
+            guard let s = scaleValues[i] ?? readNodeVec3(i, "/scale") else {
                 logger.debug("scale: node \(i) no value — skip")
                 continue
             }
             bridge.setNodeScale(atIndex: Int(i), x: s.x, y: s.y, z: s.z)
         }
         for i in dirtyTranslations.subtracting(multiDirty) {
-            guard let t = translationValues[i] ?? readVec3(pointer: "/nodes/\(i)/translation") else {
+            guard let t = translationValues[i] ?? readNodeVec3(i, "/translation") else {
                 logger.debug("translation: node \(i) no value — skip")
                 continue
             }
             bridge.setNodeTranslation(atIndex: Int(i), x: t.x, y: t.y, z: t.z)
         }
-        for i in dirtyMaterials {
-            guard let alpha = readMaterialAlpha(materialIndex: i) else { continue }
-            for nodeIndex in materialIndexToNodeIndices[i] ?? [] {
-                bridge.setNodeOpacity(atIndex: nodeIndex, opacity: alpha)
-            }
+        if !dirtyMaterials.isEmpty, !materialIndexWarned {
+            materialIndexWarned = true
+            problem(.pointer, "/materials", "a glTF material index addresses nothing in a scene built from the record — not drawn")
         }
 
         // Morph target weights.
@@ -1799,6 +2121,33 @@ final class PointerDispatcher {
         for slug in dirtyPalettes {
             recolourPalette(slug: slug, lookWritten: writtenLooks.contains(slug), into: bridge)
         }
+        // After the meshes too: a slug only file meshes draw takes its glass from the core's parameters.
+        for write in glassWrites where bridge.wearsBuiltInLook(write.slug) {
+            warnGlassOnce(slug: write.slug, field: write.field)
+        }
+        // The core's resolved glTF parameters, the scene meshes' instances, in batch order: a changed
+        // key makes the slug's instances again (with every parameter taken so far), the parameters
+        // after it land on them.
+        for write in gltfWrites {
+            switch write {
+            case .param(let slug, let name, let values):
+                let took = bridge.setGltfParameter(slug, name: name, values: values.map { NSNumber(value: $0) })
+                if took == 0, gltfMissWarned.insert("\(slug)/\(name)").inserted {
+                    problem(
+                        .pointer, "/materialOverrides/\(slug)/gltf/\(name)",
+                        "material '\(slug)': no glTF instance of it declares '\(name)' — not drawn")
+                }
+            case .state(let slug, let name, let value):
+                // A material that does not declare it draws as glTF says: nothing to tell.
+                _ = bridge.setInstanceState(slug, name: name, value: value)
+            case .key(let slug, let key):
+                if bridge.rekeyStandard(slug, key: key) < 0, gltfMissWarned.insert("\(slug)/materialKey").inserted {
+                    problem(
+                        .pointer, "/materialOverrides/\(slug)/gltf/materialKey",
+                        "material '\(slug)': its key changed, but no scene mesh here draws it in its glTF form")
+                }
+            }
+        }
         // Visibility last: a visibility write, or a mesh re-uploaded under a hidden host.
         if visibilityDirty
             || ((!dirtyGenerators.isEmpty || !dirtyDatablocks.isEmpty || !dirtyDeformed.isEmpty)
@@ -1811,45 +2160,38 @@ final class PointerDispatcher {
 
     // MARK: - Node visibility
 
-    /// Set every node's effective visibility, parents first: the bridge applies a node's flag to
-    /// its whole subtree, so a descendant set later keeps its own (hidden) state.
+    /// Set every node's visibility to the renderer, the core's: the bridge stops a node's flag at the
+    /// places under it, so the order does not matter (sorted, deterministic).
     private func applyNodeVisibility(to bridge: FilamentBridge) {
-        let effective = Self.effectiveVisibility(own: nodeVisibleOwn, parent: nodeParentIndex)
-        for index in Self.parentsFirst(nodeVisibleOwn.keys, parent: nodeParentIndex) {
-            bridge.setNodeVisible(atIndex: index, visible: effective[index] ?? true)
+        for index in nodeVisibleOwn.keys.sorted() {
+            bridge.setNodeVisible(atIndex: index, visible: nodeVisibleOwn[index] ?? true)
         }
     }
 
-    /// The node AND every ancestor (`nodeVisibleOwn` missing = visible) — the same
-    /// effective visibility the editor draws.
-    static func effectiveVisibility(own: [Int: Bool], parent: [Int: Int]) -> [Int: Bool] {
-        var out: [Int: Bool] = [:]
-        for index in own.keys {
-            var visible = true
-            var cursor: Int? = index
-            var guardSteps = own.count + 1
-            while let c = cursor, guardSteps > 0 {
-                if own[c] == false { visible = false; break }
-                cursor = parent[c]
-                guardSteps -= 1
+    /// The core's bone palettes of a tick: each on the skin renderable of its mesh's row and part,
+    /// the part's box beside — the bridge keeps it for a renderable built later.
+    func applyBonePalettes(_ palettes: [TrideBonePalette], to bridge: FilamentBridge) {
+        guard record != nil else { return }
+        for palette in palettes {
+            lastBonePalettes[BonePaletteCheck.key(mesh: palette.mesh, part: palette.part)] = palette
+            if let b = palette.bounds, b.min.count == 3, b.max.count == 3 {
+                (b.min + b.max).withUnsafeBufferPointer { box in
+                    bridge.setBonePalette(palette.bones, place: Int(palette.mesh), part: Int(palette.part), bounds: box.baseAddress)
+                }
+            } else {
+                bridge.setBonePalette(palette.bones, place: Int(palette.mesh), part: Int(palette.part), bounds: nil)
             }
-            out[index] = visible
+        }
+    }
+
+    /// The world matrix of every node, light and camera the bridge draws, by node uid and light /
+    /// camera id (`TrideKitScene.nodeWorlds`).
+    func worlds(on bridge: FilamentBridge) -> [String: [Float]] {
+        var out: [String: [Float]] = [:]
+        for (id, place) in nodeIdToGltfIndex.merging(carrierIndexById, uniquingKeysWith: { node, _ in node }) {
+            if let world = bridge.worldTransform(atIndex: place) { out[id] = world.map(\.floatValue) }
         }
         return out
-    }
-
-    /// Node indices ordered by depth (roots first), ties by index — deterministic.
-    static func parentsFirst<S: Sequence>(_ nodes: S, parent: [Int: Int]) -> [Int] where S.Element == Int {
-        func depth(_ index: Int) -> Int {
-            var d = 0
-            var cursor = parent[index]
-            while let c = cursor, d <= parent.count {
-                d += 1
-                cursor = parent[c]
-            }
-            return d
-        }
-        return nodes.sorted { (depth($0), $0) < (depth($1), $1) }
     }
 
     // MARK: - Light mutation accumulation
@@ -1974,12 +2316,12 @@ final class PointerDispatcher {
         carrierPoses[id] = pose
     }
 
-    /// Warn-once notice: a camera pose mutation with no baked carrier
-    /// (archive predates `carrierMetadata`) cannot be posed on this build.
+    /// Warn-once notice: a pose mutation of a camera the scene record lays no carrier place for
+    /// cannot be posed.
     private func warnCarrierlessCameraOnce(_ id: String) {
         guard !warnedCarrierlessCameras.contains(id) else { return }
         warnedCarrierlessCameras.insert(id)
-        problem(.pointer, id, "camera has no carrier node — its movement is dropped; re-export the scene")
+        problem(.pointer, id, "camera has no carrier place in the scene record — its movement is dropped")
     }
 
     /// The quaternion `[x, y, z, w]` of a carrier's held angles in its record's order — the
@@ -2148,6 +2490,8 @@ final class PointerDispatcher {
                 return .nodeMorphWeight(nodeIndex: idx, weightIndex: wi)
             case "visible":
                 return segs.count == 3 ? .nodeVisible(index: idx) : .unknown
+            case "drawVisible":
+                return segs.count == 3 ? .nodeDrawVisible(index: idx) : .unknown
             default:
                 if let kind = classifyDotNotation(segs[2], nodeIndex: idx) {
                     return kind
@@ -2156,6 +2500,10 @@ final class PointerDispatcher {
             }
         case "materialOverrides":
             guard segs.count >= 3, !segs[1].isEmpty else { return .unknown }
+            if segs[2] == "gltf" {
+                guard segs.count == 4, !segs[3].isEmpty else { return .unknown }
+                return segs[3] == "materialKey" ? .materialKey(slug: segs[1]) : .materialGltf(slug: segs[1], name: segs[3])
+            }
             return .materialOverride(slug: segs[1])
         case "materials":
             guard let idx = Int(segs[1]), idx >= 0 else { return .unknown }
@@ -2377,29 +2725,40 @@ final class PointerDispatcher {
 
     // MARK: - Node pointer resolution
 
-    /// Rewrite a canonical `/node/{uid}/...` mutation pointer to the
-    /// index-based `/nodes/{gltfIndex}/...` form the dispatch classifier and
-    /// the Filament bridge consume. The
-    /// FFI emits **every** node mutation — runtime overrides and
-    /// authored-timeline alike — as `/node/{uid}`, so all incoming pointers
-    /// flow through here.
-    private func resolveNodePointer(_ pointer: String) -> String {
-        Self.rewriteNodePointer(pointer, using: nodeIdToGltfIndex)
+    /// How the core reads node `place`'s `tail` back: `/node/{uid}` (a row is no glTF index); `nil`
+    /// for a place that is no node row.
+    private func nodeReadPointer(_ place: Int, _ tail: String) -> String? {
+        nodeReadPointer[place].map { $0 + tail }
     }
 
-    /// `classify` of the resolved pointer, parsed once per pointer (`kindByPointer`).
+    /// Node `place`'s 3-vector `tail` as the core holds it now; `nil` for no node row or no value.
+    private func readNodeVec3(_ place: Int, _ tail: String) -> SIMD3<Float>? {
+        guard let pointer = nodeReadPointer(place, tail) else { return nil }
+        return readVec3(pointer: pointer)
+    }
+
+    /// `incomingKind` of a core pointer, parsed once per pointer (`kindByPointer`).
     private func kind(of pointer: String) -> DispatchKind {
         if let known = kindByPointer[pointer] { return known }
-        let kind = Self.classify(resolveNodePointer(pointer))
+        let kind = Self.incomingKind(pointer, using: nodeIdToGltfIndex)
         kindByPointer[pointer] = kind
         return kind
     }
 
-    /// Pure `/node/{uid}` → `/nodes/{gltfIndex}` rewrite, factored static so
-    /// `PointerDispatcherTests` can verify it without a live `TrideScene`.
-    /// Non-`/node/` pointers (`/lights/…`, `/materials/…`, already-resolved
-    /// `/nodes/…`) pass through unchanged; an unresolvable UID returns the
-    /// original pointer (classifies as `.unknown` and is skipped).
+    /// The dispatch bucket of a pointer as the core sends it. A node is named by its uid only
+    /// (R-OneLookupPath): `/node/{uid}` is rewritten to its place, the index form `classify` reads;
+    /// an incoming `/nodes/{i}` names no node (the core names every node it knows `/node/{uid}`),
+    /// so it is `.unknown` — a problem said once — never the node or carrier at place `i`.
+    static func incomingKind(_ pointer: String, using nodeIdToGltfIndex: [String: Int]) -> DispatchKind {
+        if pointer.hasPrefix("/nodes/") { return .unknown }
+        return classify(rewriteNodePointer(pointer, using: nodeIdToGltfIndex))
+    }
+
+    /// Pure `/node/{uid}` → `/nodes/{place}` rewrite (the index form the classifier and the
+    /// Filament bridge read), factored static so `PointerDispatcherTests` can verify it without a
+    /// live `TrideScene`. The FFI emits every node mutation as `/node/{uid}`; non-`/node/` pointers
+    /// pass through unchanged (`incomingKind` refuses an incoming `/nodes/…` before this); an
+    /// unresolvable UID returns the original pointer (classifies as `.unknown`, a problem).
     static func rewriteNodePointer(
         _ pointer: String,
         using nodeIdToGltfIndex: [String: Int]
@@ -2434,8 +2793,8 @@ final class PointerDispatcher {
     /// 4-array = canonical quaternion verbatim, 3-array = Euler XYZ radians
     /// from older manifests (warn-once).
     private func readRotationQuaternion(forNodeIndex idx: Int) -> simd_quatf? {
-        let pointer = "/nodes/\(idx)/rotation"
-        guard let array = readNumberArray(pointer: pointer) else { return nil }
+        guard let pointer = nodeReadPointer(idx, "/rotation"), let array = readNumberArray(pointer: pointer)
+        else { return nil }
         return Self.synthesiseQuaternion(from: array, nodeIndex: idx)
     }
 
@@ -2497,20 +2856,6 @@ final class PointerDispatcher {
         return simd_quatf(ix: Float(q[0]), iy: Float(q[1]), iz: Float(q[2]), r: Float(q[3]))
     }
 
-    /// Euler XYZ angles in radians of `q` — the core's decomposition (`quatToEuler`: on a gimbal
-    /// pole, Y = ±90°, the coupled X ± Z goes to X), so the per-axis Euler state a node's lanes are
-    /// seeded with from its rest quaternion composes back to that pose on every host.
-    static func eulerXYZ(from q: simd_quatf) -> SIMD3<Float> {
-        let e = quatToEuler(
-            q: [Double(q.imag.x), Double(q.imag.y), Double(q.imag.z), Double(q.real)], order: eulerXYZOrder)
-        // INVARIANT: as in `eulerXYZQuaternion`.
-        guard e.count == 3 else {
-            logger.error("quatToEuler refused the xyz order — lanes seeded at zero")
-            return .zero
-        }
-        return SIMD3(Float(e[0]), Float(e[1]), Float(e[2]))
-    }
-
     // MARK: - typedValue extraction
 
     /// Extract a quaternion from TrideTypedValue. Returns nil if value
@@ -2551,6 +2896,22 @@ final class PointerDispatcher {
             return SIMD3(Float(x), Float(y), Float(z))
         default:
             return nil
+        }
+    }
+
+    /// The numbers of a value: a scalar, a vec3, a quaternion / colour (4), or a JSON number array
+    /// (a 9-float UV matrix); `nil` for anything else.
+    static func extractNumbers(from value: TrideTypedValue) -> [Float]? {
+        switch value {
+        case .scalar(let v): return [Float(v)]
+        case .vec3(let x, let y, let z): return [Float(x), Float(y), Float(z)]
+        case .quat(let x, let y, let z, let w): return [Float(x), Float(y), Float(z), Float(w)]
+        case .color(let r, let g, let b, let a): return [Float(r), Float(g), Float(b), Float(a)]
+        case .json(let raw):
+            guard let array = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [NSNumber]
+            else { return nil }
+            return array.map { $0.floatValue }
+        default: return nil
         }
     }
 
@@ -2639,26 +3000,6 @@ final class PointerDispatcher {
         return nil
     }
 
-    /// Read a material's `baseColorFactor` pointer and return its alpha
-    /// channel (4th element). Bindings often write only one component
-    /// (`/materials/0/.../baseColorFactor/3`) — but `readProperty` on
-    /// the parent pointer returns the full 4-vector, so we read once.
-    private func readMaterialAlpha(materialIndex idx: Int) -> Float? {
-        // glTF materials normally carry pbrMetallicRoughness; material
-        // extensions may live elsewhere. We try the canonical
-        // path first and fall back to the broader search.
-        if let array = readNumberArray(
-            pointer: "/materials/\(idx)/pbrMetallicRoughness/baseColorFactor"
-        ), array.count >= 4 {
-            return array[3]
-        }
-        if let array = readNumberArray(pointer: "/materials/\(idx)/baseColorFactor"),
-           array.count >= 4 {
-            return array[3]
-        }
-        return nil
-    }
-
     /// Read a JSON Pointer through the Rust runtime and decode the
     /// returned JSON string into `[Float]`. Returns `nil` if the pointer
     /// is unset or the value is not a numeric array.
@@ -2675,44 +3016,13 @@ final class PointerDispatcher {
         }
         return nil
     }
+}
 
-    // MARK: - glTF JSON walkers (statically reachable for tests)
-
-    /// Walk nodes → mesh → primitives → material; produce
-    /// `materialIndex → [nodeIndex]`. Index-based:
-    /// each node is identified by its position in the glTF `nodes[]` array,
-    /// not by name. Correctly handles duplicate node names.
-    static func collectMaterialBindingsByIndex(
-        fromNodesArray nodes: [Any],
-        meshesArray meshes: [Any]
-    ) -> [Int: [Int]] {
-        var out: [Int: [Int]] = [:]
-        for (nodeIndex, raw) in nodes.enumerated() {
-            guard let node = raw as? [String: Any],
-                  let meshIdx = (node["mesh"] as? NSNumber)?.intValue,
-                  meshIdx >= 0,
-                  meshIdx < meshes.count,
-                  let mesh = meshes[meshIdx] as? [String: Any],
-                  let primitives = mesh["primitives"] as? [[String: Any]]
-            else { continue }
-            for primitive in primitives {
-                guard let materialIdx = (primitive["material"] as? NSNumber)?.intValue else { continue }
-                out[materialIdx, default: []].append(nodeIndex)
-            }
-        }
-        return out
-    }
-
-
-    /// Read a pointer through the runtime, expecting a JSON array.
-    /// Returns `nil` if the pointer is missing or not an array.
-    private func readJsonArray(pointer: String) -> [Any]? {
-        guard let json = scene.readProperty(pointer: pointer),
-              let data = json.data(using: .utf8),
-              let raw = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
-        else { return nil }
-        return raw as? [Any]
-    }
+/// The bridge's form of a material key (`rekeyStandard`, a file mesh's `materialKey`): gltfio's field
+/// names. For Tride's test hosts, which drive the bridge by hand.
+@available(iOS 17.0, macCatalyst 17.0, *)
+extension TrideMaterialKey {
+    @_spi(TrideTesting) public var bridgeDictionary: [String: Any] { PointerDispatcher.materialKeyDictionary(self) }
 }
 
 #endif  // canImport(TrideKitFilamentBridge): a host without the bridge (macOS) gets TrideCore only

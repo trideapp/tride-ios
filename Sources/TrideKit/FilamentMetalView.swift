@@ -1,8 +1,9 @@
 /// SwiftUI `MTKViewRepresentable` owning the `FilamentBridge` lifecycle — the renderer under `TrideSceneView`.
 ///
 /// ## Public API (`@_spi(TrideTesting)`: Tride's own test hosts; apps use `TrideSceneView`)
-/// - `FilamentMetalView` — creates MTKView, loads the first non-nil `sceneData` (JSON glTF) once —
-///   at creation or on a later update — and drives `render`/`dispose` through the coordinator.
+/// - `FilamentMetalView` — creates MTKView, builds the first non-nil `scene` once — at creation or on
+///   a later update — from the core's scene record (`TrideKitScene.loadByRecord`), and drives
+///   `render`/`dispose` through the coordinator.
 /// - `FilamentMetalView.RenderPolicy` (= `TrideSceneView.RenderPolicy`) — `.continuous` (every display frame, the default) or `.onDemand`
 ///   (only frames with something new: the bridge's `needsRender`, raised by a tick that moved the
 ///   scene, a resize, the app returning to the foreground).
@@ -20,6 +21,8 @@
 /// - One view loads one scene: another scene needs a new view identity (`.id(…)`).
 /// - `.onDemand` suits scenes without temporal effects (no TAA): a paused or off-screen scene then
 ///   costs no GPU at all. A frame Filament skips keeps `needsRender` up — the next display frame retries.
+/// - A scene the core hands no record of is not built: `onLoadError` gets `TrideKitSceneNotBuiltError`
+///   with the core's words. Without `scene` the view only makes its bridge (a host that drives it).
 
 #if (os(iOS) || targetEnvironment(macCatalyst)) && canImport(SwiftUI) && canImport(MetalKit) && canImport(TrideKitFilamentBridge)
 
@@ -37,17 +40,6 @@ private let logger = Logger(subsystem: "studio.tride.kit", category: "FilamentMe
 /// owns the bridge's load / render / dispose lifecycle. iOS 17+.
 @available(iOS 17.0, macCatalyst 17.0, *)
 @_spi(TrideTesting) public struct FilamentMetalView: UIViewRepresentable {
-
-    /// JSON glTF scene data (extracted from `.trd` archive by `TrideKitScene`). May be `nil` at first:
-    /// the view loads it on the first update that brings it. Later changes are ignored — show another
-    /// scene with a new view identity (`.id(…)`).
-    public let sceneData: Data?
-
-    /// External resources from the `.trd` archive (e.g. `scene.bin`,
-    /// `assets/texture.png`). Fed to `FilamentBridge.addResourceData`
-    /// before loading so `ResourceLoader` resolves external URIs.
-    /// Empty for self-contained scenes with inline data: URIs.
-    public let sceneResources: [(name: String, data: Data)]
 
     /// The scene failed to load. Called on the main thread, inside the SwiftUI update.
     public let onLoadError: ((Error) -> Void)?
@@ -80,9 +72,11 @@ private let logger = Logger(subsystem: "studio.tride.kit", category: "FilamentMe
     /// `scene` (without one it is ignored, with one warning).
     public let renderOverrides: TrideRenderOverrides?
 
-    /// The scene the view shows: it hears the view's size at every layout, whether or not it takes
-    /// the touches — with it the scene's ticks send the camera the view draws through (picking, Look
-    /// at Camera tags). `nil` = a host that drives the bridge itself.
+    /// The scene the view shows, built from the core's record on the first update that brings it
+    /// (later changes are ignored — show another scene with a new view identity, `.id(…)`). It hears
+    /// the view's size at every layout, whether or not it takes the touches — with it the scene's ticks
+    /// send the camera the view draws through (picking, Look at Camera tags). `nil` = a host that
+    /// drives the bridge itself.
     public let scene: TrideKitScene?
 
     /// The view's touches go to `scene` — one finger's down / move / up, then cancel on the lift (a
@@ -93,8 +87,6 @@ private let logger = Logger(subsystem: "studio.tride.kit", category: "FilamentMe
     public let handlesTouches: Bool
 
     public init(
-        sceneData: Data?,
-        sceneResources: [(name: String, data: Data)] = [],
         renderPolicy: RenderPolicy = .continuous,
         pixelScale: CGFloat? = nil,
         preferredFPS: Int? = nil,
@@ -105,8 +97,6 @@ private let logger = Logger(subsystem: "studio.tride.kit", category: "FilamentMe
         onLoaded: ((FilamentBridge) -> Void)? = nil,
         onBridgeCreated: ((FilamentBridge) -> Void)? = nil
     ) {
-        self.sceneData = sceneData
-        self.sceneResources = sceneResources
         self.renderPolicy = renderPolicy
         self.pixelScale = pixelScale
         self.preferredFPS = preferredFPS
@@ -198,16 +188,13 @@ private let logger = Logger(subsystem: "studio.tride.kit", category: "FilamentMe
     }
 
     private func loadSceneIfNeeded(_ coordinator: Coordinator) {
-        guard let bridge = coordinator.bridge, let sceneData, !coordinator.sceneLoadAttempted else { return }
+        guard let bridge = coordinator.bridge, let scene, !coordinator.sceneLoadAttempted else { return }
         coordinator.sceneLoadAttempted = true
         do {
-            for resource in sceneResources {
-                bridge.addResourceData(resource.data, name: resource.name)
-            }
-            try bridge.loadGltfJson(sceneData)
+            try scene.load(into: bridge)
             onLoaded?(bridge)
         } catch {
-            logger.error("loadGltfJson failed: \(error.localizedDescription, privacy: .public)")
+            logger.error("scene load failed: \(error.localizedDescription, privacy: .public)")
             onLoadError?(error)
         }
     }

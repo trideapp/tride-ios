@@ -16,6 +16,8 @@
 /// - `preferredFPS` may change at any time: the same view and scene go on at the new rate.
 /// - `renderOverrides` may change at any time: the same view and scene draw with the new knobs from the
 ///   next frame, the scene's animations untouched.
+/// - The view builds the scene from the runtime's own description of it (the core's scene record);
+///   one the runtime hands none of reaches `onError` as `TrideKitSceneNotBuiltError`.
 
 #if (os(iOS) || targetEnvironment(macCatalyst)) && canImport(SwiftUI) && canImport(MetalKit) && canImport(TrideKitFilamentBridge)
 
@@ -80,8 +82,6 @@ public struct TrideSceneView: View {
 
     public var body: some View {
         FilamentMetalView(
-            sceneData: scene.sceneGltfData,
-            sceneResources: scene.sceneResources,
             renderPolicy: renderPolicy,
             pixelScale: pixelScale,
             preferredFPS: preferredFPS,

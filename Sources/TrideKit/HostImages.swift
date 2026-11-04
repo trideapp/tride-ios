@@ -3,6 +3,7 @@
 ///
 /// ## Public API
 /// - `TrideImageResult` — how `TrideKitScene.setImage` ended: `.loaded`, `.failed(reason:)`, `.superseded`.
+/// - `TrideHostPictureProbe` (`@_spi(TrideTesting)`) — the decoder's pixels for Tride's test hosts.
 ///
 /// ## Internal
 /// - `HostPicture` — one picture as straight-alpha sRGB RGBA8; `HostImageKey` — `(name, revision)`.
@@ -12,19 +13,25 @@
 /// - `HostImageRequests` — the latest request per input wins; an older decode is dropped.
 ///
 /// ## Non-obvious constraints
-/// - A picture that fits in 2048 px and needs no turn is read whole (`CreateImageAtIndex`, its
-///   alpha exact); otherwise through a thumbnail — `kCGImageSourceCreateThumbnailFromImageAlways`,
-///   not `…IfAbsent`, which hands back the preview embedded in the file (a JPEG's EXIF thumbnail,
-///   ~160 px) when there is one (`CGImageSource.h`). A thumbnail is never larger than the image, and
-///   ImageIO draws it premultiplied: there a pixel of low alpha loses some colour precision.
-/// - Straight (non-premultiplied) alpha in sRGB, as glTF textures and the web host
-///   (`createImageBitmap(…, { premultiplyAlpha: 'none' })`); vImage converts, never a
-///   `CGBitmapContext` (premultiplied only).
+/// - Straight alpha in sRGB, as glTF textures and the web host (`premultiplyAlpha: 'none'`); vImage
+///   converts, never a `CGBitmapContext` (premultiplied only).
+/// - A picture within 2048 px that needs no turn is read whole (`CreateImageAtIndex`), its alpha
+///   exact: ImageIO on iOS hands a PNG back premultiplied (on macOS not), so such pixels are read
+///   again by the bridge's one picture decoder (`FilamentBridge.decodedPicturePixels`, stb) and laid
+///   in the picture's own colour space — the sRGB conversion stays ImageIO's. WebP / HEIC
+///   (stb reads neither) keep ImageIO's premultiplied pixels.
+/// - Otherwise a thumbnail — `kCGImageSourceCreateThumbnailFromImageAlways`, not `…IfAbsent` (that
+///   is the file's embedded preview, a JPEG's ~160 px EXIF thumbnail, `CGImageSource.h`); ImageIO
+///   draws it premultiplied: there a pixel of low alpha loses some colour precision.
 
 import Accelerate
 import CoreGraphics
 import Foundation
 import ImageIO
+
+#if canImport(TrideKitFilamentBridge)
+import TrideKitFilamentBridge
+#endif
 
 /// How `TrideKitScene.setImage` ended.
 public enum TrideImageResult: Sendable, Equatable {
@@ -81,7 +88,7 @@ enum HostImageDecoder {
            let whole = CGImageSourceCreateImageAtIndex(
             source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
         {
-            return try straightRGBA(whole)
+            return try straightRGBA(storedAlpha(of: whole, in: data) ?? whole)
         }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -93,6 +100,33 @@ enum HostImageDecoder {
             throw Failure(reason: "the picture could not be decoded")
         }
         return try straightRGBA(image)
+    }
+
+    /// `image`'s pixels as the file stores them when ImageIO premultiplied them: the bridge's picture
+    /// decoder (stb) reads `data` again, laid in `image`'s colour space (sRGB for a grey or indexed
+    /// one: stb hands those back as RGB). `nil` = keep `image` — its alpha is already straight, or the
+    /// decoder does not read the format, or it read another size.
+    static func storedAlpha(of image: CGImage, in data: Data) -> CGImage? {
+        switch image.alphaInfo {
+        case .premultipliedLast, .premultipliedFirst: break
+        default: return nil
+        }
+        #if canImport(TrideKitFilamentBridge)
+        var size = CGSize.zero
+        guard let pixels = FilamentBridge.decodedPicturePixels(data, size: &size),
+              Int(size.width) == image.width, Int(size.height) == image.height,
+              let space = image.colorSpace.flatMap({ $0.model == .rgb ? $0 : nil })
+                ?? CGColorSpace(name: CGColorSpace.sRGB),
+              let provider = CGDataProvider(data: pixels as CFData)
+        else { return nil }
+        return CGImage(
+            width: image.width, height: image.height, bitsPerComponent: 8, bitsPerPixel: 32,
+            bytesPerRow: image.width * 4, space: space,
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+            provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+        #else
+        return nil
+        #endif
     }
 
     /// `image` as it is when it fits in 2048 px a side, else drawn down to fit, proportions kept.
@@ -144,6 +178,16 @@ enum HostImageDecoder {
             }
         }
         return HostPicture(width: width, height: height, pixels: pixels)
+    }
+}
+
+/// What the decoder makes of `data` — the pixels a photo slot uploads — for Tride's own test hosts
+/// (the simulator's ImageIO differs from the Mac's).
+@_spi(TrideTesting) public enum TrideHostPictureProbe {
+    /// Straight-alpha sRGB RGBA8, rows top to bottom, or the decoder's failure.
+    public static func decode(_ data: Data) throws -> (width: Int, height: Int, pixels: Data) {
+        let picture = try HostImageDecoder.decode(data)
+        return (picture.width, picture.height, picture.pixels)
     }
 }
 

@@ -1,7 +1,8 @@
 /// Swift convenience overloads bridging `simd` types onto ObjC `FilamentBridge` entry points.
 ///
 /// ## Public API
-/// - Internal `FilamentBridge` extensions — `simd_quatf`/`SIMD3<Float>` adapters for rotation, scale, translation.
+/// - Internal `FilamentBridge` extensions — `simd_quatf`/`SIMD3<Float>` adapters for a place's
+///   rotation, scale, translation (by its number, `/nodes/{N}` after the dispatcher's rewrite).
 /// - `FilamentBridge.eulerXYZRotationMatrix` — Euler XYZ radians → column-major `simd_float3x3`
 ///   (the IBL rotation boundary conversion); + `eulerXYZ`-based IBL overloads.
 ///
@@ -22,48 +23,20 @@ import TrideKitFilamentBridge
 extension FilamentBridge {
 
     /// `simd_quatf` overload (`(ix, iy, iz, real)` layout), converted to the bridge's
-    /// `simd_float4 = (x, y, z, w)`.
-    func setNodeRotation(_ nodeName: String, quaternion: simd_quatf) {
-        let v = quaternion.vector  // (ix, iy, iz, r) == (x, y, z, w)
-        setNodeRotation(nodeName, quaternion: v)
-    }
-
-    /// Canonical JSON Pointer variant: `/nodes/{N}/rotation`.
+    /// `simd_float4 = (x, y, z, w)`: `/nodes/{N}/rotation`.
     func setNodeRotation(atIndex nodeIndex: Int, quaternion: simd_quatf) {
         let v = quaternion.vector  // (ix, iy, iz, r) == (x, y, z, w)
         setNodeRotation(atIndex: nodeIndex, quaternion: v)
     }
 
-    /// `SIMD3<Float>` overload.
-    func setNodeScale(_ nodeName: String, scale: SIMD3<Float>) {
-        setNodeScale(nodeName, x: scale.x, y: scale.y, z: scale.z)
-    }
-
-    /// Canonical JSON Pointer variant: `/nodes/{N}/scale`.
+    /// `SIMD3<Float>` overload: `/nodes/{N}/scale`.
     func setNodeScale(atIndex nodeIndex: Int, scale: SIMD3<Float>) {
         setNodeScale(atIndex: nodeIndex, x: scale.x, y: scale.y, z: scale.z)
     }
 
-    /// SIMD3 convenience for `/nodes/{name}/translation`.
-    func setNodeTranslation(_ nodeName: String, translation: SIMD3<Float>) {
-        setNodeTranslation(nodeName, x: translation.x, y: translation.y, z: translation.z)
-    }
-
-    /// Canonical JSON Pointer variant: `/nodes/{N}/translation`.
+    /// SIMD3 convenience: `/nodes/{N}/translation`.
     func setNodeTranslation(atIndex nodeIndex: Int, translation: SIMD3<Float>) {
         setNodeTranslation(atIndex: nodeIndex, x: translation.x, y: translation.y, z: translation.z)
-    }
-
-    /// OPT-3 coalesced TRS: accepts `simd_quatf` for rotation (converted
-    /// to `simd_float4` via `.vector`), `SIMD3<Float>` for T/S.
-    func setNodeTRS(
-        _ nodeName: String,
-        translation: SIMD3<Float>,
-        rotation: simd_quatf,
-        scale: SIMD3<Float>,
-        mask: FilamentBridgeTRSMask
-    ) {
-        setNodeTRS(nodeName, translation: translation, rotation: rotation.vector, scale: scale, mask: mask)
     }
 
     /// Build a column-major rotation matrix from Euler XYZ angles in radians,
@@ -103,7 +76,6 @@ extension FilamentBridge {
 /// `FilamentMetalView.onLoadError` receives.
 public enum TrideFilamentError: Error, Equatable {
     case bridgeDisposed
-    case assetParseFailed
     case resourceLoadFailed
     case assetAlreadyLoaded
     case unknown(code: Int, description: String)
@@ -118,8 +90,6 @@ public enum TrideFilamentError: Error, Equatable {
         switch nsErr.code {
         case Int(FilamentBridgeErrorCode.disposed.rawValue):
             self = .bridgeDisposed
-        case Int(FilamentBridgeErrorCode.assetParseFailed.rawValue):
-            self = .assetParseFailed
         case Int(FilamentBridgeErrorCode.resourceLoadFailed.rawValue):
             self = .resourceLoadFailed
         case Int(FilamentBridgeErrorCode.assetAlreadyLoaded.rawValue):

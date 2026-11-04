@@ -28,7 +28,8 @@
 ///   inputs bound to a scroll source; the app calls it, nothing observes a view yet.
 /// - `setRenderOverrides(_:)` / `renderOverrides` / `sceneRenderSettings` — the host's render knobs
 ///   (`TrideRenderOverrides`: MSAA both ways; bloom, shadows, depth of field off) over the scene's
-///   render settings, the knobs set, and the settings the scene's designer chose.
+///   render settings, the knobs set, and the settings the scene's designer chose. Cleared over a
+///   scene without render settings, the view draws as a new one (`restoreInitialRenderSettings`).
 /// - `moduleInstanceCounts()` — per generator, the clones the core evaluated and the bridge draws
 ///   (test / debug introspection, `TrideModuleInstanceCount`); `renderSettingsDictionary()` — the
 ///   render settings as the bridge takes them, knobs applied (test hosts try variants).
@@ -59,6 +60,12 @@
 ///   scene's animation has it; an on-demand view draws one frame.
 /// - One view at a time: attaching while another live view shows the scene moves it to the new view
 ///   and reports a `.runtime` diagnostic (subject `view`); the earlier view keeps its last frame.
+/// - A view builds the scene from the core's scene record (`load(into:)`), never from the file's glTF;
+///   a scene the core hands no record of is not built (`TrideKitSceneNotBuiltError`). What the scene
+///   draws only in part (a `requires` iOS does not draw, a material without values the record lacks)
+///   is said once (`partialDrawNotice`, diagnostic `partialDraw`).
+/// - The core keeps no glTF carrier of an older file past the load: a view built at any time draws
+///   the same meshes from the core's record and datablocks.
 
 import Foundation
 import Observation
@@ -176,7 +183,7 @@ private final class SceneSignalInbox: TrideOutgoingEventListener, TrideLayerStat
 
 /// A Tride scene for an iOS host: the Tride runtime (`TrideScene`) plus its connection to the
 /// Filament view. Drives a CADisplayLink tick loop and applies each tick's changes to the view.
-/// One scene per view: a `FilamentBridge` loads one glTF for its lifetime.
+/// One scene per view: a `FilamentBridge` builds one scene for its lifetime.
 ///
 /// ### Typical usage in SwiftUI
 ///
@@ -184,8 +191,6 @@ private final class SceneSignalInbox: TrideOutgoingEventListener, TrideLayerStat
 /// @State private var scene: TrideKitScene?
 ///
 /// FilamentMetalView(
-///   sceneData: scene?.sceneGltfData,
-///   sceneResources: scene?.sceneResources ?? [],
 ///   scene: scene,
 ///   onLoaded: { bridge in
 ///       scene?.attachBridge(bridge)
@@ -203,18 +208,6 @@ private final class SceneSignalInbox: TrideOutgoingEventListener, TrideLayerStat
 @MainActor
 @Observable
 public final class TrideKitScene {
-
-    /// JSON glTF (`scene.gltf`) bytes extracted from the `.trd` archive.
-    /// Passed to `FilamentMetalView(sceneData:)` for rendering.
-    /// `AssetLoader::createAsset()` accepts both GLB and JSON-based glTF 2.0
-    /// (https://github.com/google/filament/blob/main/libs/gltfio/include/gltfio/AssetLoader.h).
-    @_spi(TrideTesting) public let sceneGltfData: Data
-
-    /// Non-manifest, non-glTF entries from the `.trd` archive (e.g.
-    /// `scene.bin`, `assets/texture.png`). Fed to `FilamentBridge.addResourceData`
-    /// before loading so `ResourceLoader` resolves external URIs without
-    /// filesystem access. Empty for self-contained scenes (data: URIs).
-    @_spi(TrideTesting) public let sceneResources: [(name: String, data: Data)]
 
     /// Rust runtime handle, owned for the life-time of this object.
     /// uniffi releases on `deinit`. `nonisolated(unsafe)`: the core serialises every call with its
@@ -271,6 +264,17 @@ public final class TrideKitScene {
     /// it updates when it changes.
     public private(set) var isPlaying: Bool = false
 
+    /// Why the scene is drawn only in part — a `requires` iOS does not draw yet, a material without
+    /// values the record does not carry yet; `nil` = drawn whole. The same text went to the
+    /// diagnostics (`partialDraw`).
+    @_spi(TrideTesting) @ObservationIgnored
+    public private(set) var partialDrawNotice: String?
+
+    /// The scene as the view built it from the core's record — the dispatcher addresses nodes,
+    /// lights and cameras through it. `nil` until a view built it.
+    @ObservationIgnored
+    private(set) var recordScene: RecordScene?
+
     /// Load a `.trd` on the calling (main) actor. For a large scene prefer `load(_:)`, which reads the
     /// archive off the main thread.
     ///
@@ -289,25 +293,16 @@ public final class TrideKitScene {
     /// What loading produces before the scene is wired on the main actor. The runtime handle is safe to
     /// hand over: the core guards it with its own lock.
     private struct Parsed: @unchecked Sendable {
-        let gltf: Data
-        let resources: [(name: String, data: Data)]
         let scene: TrideScene
         let bytes: Int
     }
 
-    /// The runtime reads the archive once; the glTF and its external resources (`scene.bin`, `assets/…`,
-    /// for gltfio's resource loader) come from it — TrideKit has no zip reader of its own.
+    /// The runtime reads the archive once — TrideKit has no zip reader of its own.
     nonisolated private static func parse(_ trdBytes: Data) throws -> Parsed {
-        let scene = try TrideScene.load(trdBytes: trdBytes)
-        let resources = scene.resourceNames().compactMap { name in
-            scene.assetBytes(uri: name).map { (name: name, data: $0) }
-        }
-        return Parsed(gltf: scene.sceneGltfBytes(), resources: resources, scene: scene, bytes: trdBytes.count)
+        Parsed(scene: try TrideScene.load(trdBytes: trdBytes), bytes: trdBytes.count)
     }
 
     private init(parsed: Parsed) throws {
-        self.sceneGltfData = parsed.gltf
-        self.sceneResources = parsed.resources
         self.trideScene = parsed.scene
         // Only the pointers whose value moved; the bridge holds the rest.
         try trideScene.setChangedOnly(enabled: true)
@@ -317,7 +312,7 @@ public final class TrideKitScene {
         _ = try trideScene.subscribeEvents(listener: signals)
         _ = try trideScene.subscribeLayerStateChanges(listener: signals)
         logger.notice(
-            "loaded TrideScene from \(parsed.bytes) bytes (gltf=\(parsed.gltf.count), resources=\(parsed.resources.count))"
+            "loaded TrideScene from \(parsed.bytes) bytes"
         )
     }
 
@@ -407,13 +402,93 @@ public final class TrideKitScene {
         }
     }
 
-    /// Wire the scene to a freshly created Filament bridge. Call this
-    /// after `FilamentMetalView`'s `onLoaded` callback fires (asset is
-    /// guaranteed loaded by then, so `bridge.setNodeRotation(_:_:)`
-    /// won't silently no-op).
-    ///
-    /// Re-attaching is **not** supported — pass a fresh `TrideKitScene`
-    /// for a fresh asset.
+    /// What the scene draws only in part: added to `partialDrawNotice` (the build's reasons joined
+    /// by `; `, as Android) and said once to the diagnostics.
+    func notePartialDraw(_ notice: String) {
+        partialDrawNotice = partialDrawNotice.map { "\($0); \(notice)" } ?? notice
+        note(TrideKitDiagnostic(kind: .runtime, subject: "partialDraw", message: notice))
+    }
+
+    /// Build the scene in `bridge` from the core's scene record — what `FilamentMetalView` does. A
+    /// scene the core hands no record of is not built: `TrideKitSceneNotBuiltError`.
+    @_spi(TrideTesting) public func load(into bridge: FilamentBridge) throws {
+        guard let record = trideScene.sceneRecord() else {
+            let error = TrideKitSceneNotBuiltError(reason: "the runtime handed no scene record")
+            note(TrideKitDiagnostic(kind: .load, subject: "scene", message: error.message))
+            throw error
+        }
+        try loadByRecord(record, into: bridge)
+    }
+
+    /// Build the scene in `bridge` from the core's `record` (`RecordScene`). The dispatcher binds to
+    /// its table at `attachBridge`, and the core says each node's visibility to the renderer
+    /// (`/node/{uid}/drawVisible`). A `requires` iOS does not draw is said once (`partialDraw`).
+    @_spi(TrideTesting) public func loadByRecord(_ record: TrideSceneRecord, into bridge: FilamentBridge) throws {
+        let built = RecordScene(record: record)
+        // A new build says its own reasons only.
+        partialDrawNotice = nil
+        try bridge.loadScene(places: built.places)
+        recordScene = built
+        if let notice = RecordScene.requiresNotice(record.requires) { notePartialDraw(notice) }
+        do {
+            try trideScene.setDrawVisibility(enabled: true)
+        } catch {
+            note(TrideKitDiagnostic(kind: .runtime, subject: "drawVisibility", message: error.localizedDescription))
+        }
+    }
+
+    /// Once the meshes are built: the materials drawn without values the record does not carry yet
+    /// (`FilamentBridge.standardMaterialGaps`), by slug, said once — such a frame is drawn in part.
+    /// The same text as Android's `RecordScene.gapsNotice`.
+    static func recordGapsNotice(_ gaps: [String: [String]]) -> String? {
+        guard !gaps.isEmpty else { return nil }
+        let each = gaps.keys.sorted().map { "'\($0)' without its \(gaps[$0, default: []].joined(separator: ", "))" }
+        return "the scene draws " + each.joined(separator: "; ")
+    }
+
+    /// Each node's, light's and camera's place and its world matrix composed from the record in
+    /// `Double` (`RecordScene.worlds`), by node uid and light / camera id; `[:]` before a view. For
+    /// checks against what Filament composed (`FilamentBridge.worldTransform(atIndex:)`).
+    @_spi(TrideTesting) public func recordWorlds() -> [String: (place: Int, world: [Double])] {
+        guard let recordScene else { return [:] }
+        let worlds = RecordScene.worlds(of: recordScene.places)
+        var out: [String: (place: Int, world: [Double])] = [:]
+        for (id, place) in recordScene.placeOf.merging(recordScene.carrierPlace, uniquingKeysWith: { node, _ in node }) {
+            out[id] = (place, worlds[place])
+        }
+        return out
+    }
+
+    /// The palette check (the parity gate): every palette the core handed last against the one
+    /// gltfio's `updateBoneMatrices` rule makes of the worlds the attached view's TransformManager
+    /// composed (`BonePaletteCheck`); `nil` before `attachBridge`.
+    @_spi(TrideTesting) public func bonePaletteCheck() -> BonePaletteCheck.Result? {
+        guard let bridge, !bridge.isDisposed, let recordScene else { return nil }
+        // A skin cut into parts: each part's palette names its own joints (the decoder's cut), as
+        // the meshes were drawn — read at upload, so a released source changes nothing here.
+        return BonePaletteCheck.measure(
+            palettes: Array(dispatcher.lastBonePalettes.values), skins: recordScene.skins,
+            partJoints: dispatcher.skinPartJoints, world: { bridge.worldTransform(atIndex: $0)?.map(\.floatValue) })
+    }
+
+    /// The bone palette the core handed last per mesh row and skin part, ordered by both — what the
+    /// attached view bends its skins with; `[]` before `attachBridge`.
+    @_spi(TrideTesting) public func bonePalettes() -> [TrideBonePalette] {
+        dispatcher.lastBonePalettes.keys.sorted().compactMap { dispatcher.lastBonePalettes[$0] }
+    }
+
+    /// The world matrix of every node, light and camera the attached view draws, as its
+    /// TransformManager composes it (16 numbers, column-major) — by node uid and light / camera id;
+    /// one the view has no entity for is left out. For checks (the parity gate); `[:]` before
+    /// `attachBridge`.
+    @_spi(TrideTesting) public func nodeWorlds() -> [String: [Float]] {
+        guard let bridge, !bridge.isDisposed else { return [:] }
+        return dispatcher.worlds(on: bridge)
+    }
+
+    /// Wire the scene to the bridge its view built it in (`load(into:)`; `FilamentMetalView`'s
+    /// `onLoaded`). Another bridge later takes the scene over (a view shown again). A bridge the
+    /// scene was not built in is addressed by the core's record all the same.
     @_spi(TrideTesting) public func attachBridge(_ bridge: FilamentBridge) {
         TrideKitThreadRule.requireMain()
         // One view shows one scene: a view still showing it stops following it from here on.
@@ -427,7 +502,17 @@ public final class TrideKitScene {
         bridge.pixelationGridSource = Self.corePixelationGrid
         // The default camera stands where the core frames the scene for the view's aspect.
         bridge.defaultFramingSource = coreDefaultFraming()
-        dispatcher.bind(to: bridge)
+        // The table the scene was built by (`load(into:)`); a bridge a host built itself is
+        // addressed by the same table, read from the core's record.
+        if let table = recordScene ?? trideScene.sceneRecord().map(RecordScene.init(record:)) {
+            dispatcher.bind(to: bridge, record: table)
+        } else {
+            note(TrideKitDiagnostic(
+                kind: .load, subject: "scene", message: "scene not built: the runtime handed no scene record"))
+        }
+        if recordScene != nil, let notice = Self.recordGapsNotice(bridge.standardMaterialGaps) {
+            notePartialDraw(notice)
+        }
         releaseUnshownPictures()
         bridgeTookRenderSettings = false
         applyRenderSettings(to: bridge)
@@ -593,11 +678,9 @@ public final class TrideKitScene {
         try trideScene.trigger(name: name)
     }
 
-    /// Read the current value of any glTF JSON Pointer through the Rust
-    /// runtime. Returns `nil` if the runtime hasn't seen the pointer
-    /// yet (no binding has written there, so the document still holds
-    /// the original glTF value — readers should fall back to the source
-    /// glTF in that case).
+    /// Read the value the core holds at `pointer` (JSON-encoded): a node's pose, visibility or
+    /// weights from its node table (`/node/{uid}/…`), or scene state. `nil` when the pointer
+    /// names nothing the core holds.
     @_spi(TrideTesting) nonisolated public func readProperty(_ pointer: String) -> String? {
         trideScene.readProperty(pointer: pointer)
     }
@@ -772,7 +855,12 @@ public final class TrideKitScene {
                 dispatcher.flushDeferredTrunks(into: bridge)
                 bridge.setNeedsRender()
             }
+            if !result.tick.bonePalettes.isEmpty {
+                dispatcher.applyBonePalettes(result.tick.bonePalettes, to: bridge)
+                bridge.setNeedsRender()
+            }
         } else {
+            // Without a renderer the palettes go: `attachBridge` asks the core for its whole frame.
             pendingAdvance += result.tick.mutations
         }
         releaseUnshownPictures()
@@ -884,30 +972,27 @@ public final class TrideKitScene {
         applyCurrentState()
     }
 
-    /// The attached bridge was handed render settings (it no longer draws Filament's own defaults).
+    /// The attached bridge was handed render settings (it no longer draws what a new view draws).
     @ObservationIgnored
     private var bridgeTookRenderSettings = false
 
-    /// A knob that keeps the scene's value: over a scene without render settings the core answers
-    /// with the defaults its knobs lay over.
-    private static let sceneValueKnob = TrideRenderOverrides(bloom: true)
-
     /// The render settings to draw: the core lays the knobs over the scene's (no knob = the scene's
-    /// exactly). A scene without render settings whose bridge took knobbed ones gets back the
-    /// defaults those knobs were laid over when the knobs are cleared.
+    /// exactly); `nil` for a scene without render settings and no knob.
     private func appliedRenderSettings() -> TrideRenderSettings? {
-        if let settings = trideScene.renderSettingsWith(overrides: renderOverrides ?? TrideRenderOverrides()) {
-            return settings
-        }
-        return bridgeTookRenderSettings ? trideScene.renderSettingsWith(overrides: Self.sceneValueKnob) : nil
+        trideScene.renderSettingsWith(overrides: renderOverrides ?? TrideRenderOverrides())
     }
 
     /// The scene's `renderSettings` with the host's knobs, as the core lays them (the editor viewport
     /// shows the same without knobs). The FFI hands back the normalized form (defaults resolved by
-    /// the schema), projected 1:1 onto the bridge dictionary — no host-side defaults. Absent →
-    /// Filament defaults stay, logged so the difference is diagnosable.
+    /// the schema), projected 1:1 onto the bridge dictionary — no host-side defaults. Absent → the
+    /// view draws as a new view does (Filament's defaults): one that took knobbed settings goes back
+    /// to the options it was made with, the schema's defaults are not what a new view draws.
     private func applyRenderSettings(to bridge: FilamentBridge) {
         guard let settings = appliedRenderSettings() else {
+            if bridgeTookRenderSettings {
+                bridge.restoreInitialRenderSettings()
+                bridgeTookRenderSettings = false
+            }
             logger.notice("renderSettings: not authored — Filament defaults")
             return
         }
@@ -969,6 +1054,11 @@ public final class TrideKitScene {
             signposts.endInterval("dispatch", interval)
             // A slot that moved to a newer picture or back to its placeholder frees the old pixels.
             releaseUnshownPictures()
+        }
+        // The skins' palettes this tick moved, after the poses they were made from.
+        if let bridge, !result.bonePalettes.isEmpty {
+            dispatcher.applyBonePalettes(result.bonePalettes, to: bridge)
+            bridge.setNeedsRender()
         }
         // A paused scene (a single `tickOnce`) has no next tick to wait for.
         if !isPlaying, let bridge, dispatcher.flushDeferredTrunks(into: bridge) { bridge.setNeedsRender() }
@@ -1062,6 +1152,16 @@ public struct MissingBindingsError: LocalizedError, Equatable {
         let declaredList = declared.isEmpty ? "(none)" : declared.joined(separator: ", ")
         return "Scene is missing required bindings: \(missingList). Declared: \(declaredList)."
     }
+}
+
+/// A view could not build the scene: the runtime handed it no scene record. `reason` is the
+/// runtime's words; the scene itself stays usable (its state, bindings and signals).
+public struct TrideKitSceneNotBuiltError: LocalizedError, Equatable {
+    public let reason: String
+
+    public var message: String { "scene not built: \(reason)" }
+
+    public var errorDescription: String? { message }
 }
 
 #endif  // canImport(TrideKitFilamentBridge): a host without the bridge (macOS) gets TrideCore only

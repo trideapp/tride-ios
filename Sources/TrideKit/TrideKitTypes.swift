@@ -176,7 +176,8 @@ public enum TrideKitAdvance: Sendable, Equatable {
 /// A problem the scene ran into that the host should know about (`subscribeDiagnostics`). Each
 /// `(kind, subject, message)` is reported once per scene; the log gets it too. `code` names the
 /// problem where it has a name every host shares: `material.package-missing`,
-/// `material.package-stale`, `material.package-version` (a node material drawn plainly).
+/// `material.package-stale`, `material.package-version`, `material.package-refused` (a node
+/// material drawn plainly).
 public struct TrideKitDiagnostic: Sendable, Equatable, CustomStringConvertible {
     public enum Kind: String, Sendable {
         /// A binding expression failed on a step; `subject` is its pointer.
