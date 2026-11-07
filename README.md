@@ -1,4 +1,4 @@
-# TrideKit for iOS — Tride 0.14.0
+# TrideKit for iOS — Tride 0.15.0
 
 Plays Tride scenes (`.trd`) in an iOS app: the Tride runtime, the Filament renderer and a SwiftUI view on
 top of them. A scene is built in Tride Editor ([tride-editor](https://github.com/trideapp/tride-editor))
@@ -6,7 +6,7 @@ and exported as `.trd`; the app only writes values into it (bindings) and fires 
 decides what to show.
 
 This repository is generated from the Tride source repository: one commit per release, changes are not
-accepted here; questions and bugs go to Issues. Licence — `LICENSE` (Tride Players Licence 1.1); third-party
+accepted here; questions and bugs: support@tride.ws. Licence — `LICENSE` (Tride Players Licence 1.1); third-party
 components and their licences — `THIRD_PARTY_NOTICES.md`; which build this release is — `SNAPSHOT.md`;
 what changed — `CHANGELOG.md`.
 
@@ -19,26 +19,10 @@ what changed — `CHANGELOG.md`.
 | `Examples/TridePlayer` | An example player: opens any `.trd`, a control for each of its bindings |
 | `Docs/` | [API](Docs/API.md) |
 
-## Access
-
-The repository is private. Xcode clones it through your GitHub account and downloads the package's
-binaries (release assets) through the GitHub API with a token from `~/.netrc`:
-
-1. Xcode → Settings → Accounts → "+" → GitHub.
-2. A token: github.com → Settings → Developer settings → Fine-grained tokens → Generate new token.
-   Resource owner — `trideapp`, Repository access — only `tride-ios`, Permissions → Contents: Read-only.
-3. `~/.netrc` (and `chmod 600 ~/.netrc`):
-
-```
-machine api.github.com
-  login <your GitHub login>
-  password <token>
-```
-
 ## In your app
 
 1. File → Add Package Dependencies… → `https://github.com/trideapp/tride-ios` → Dependency Rule
-   "Up to Next Major Version" from 0.14.0.
+   "Up to Next Major Version" from 0.15.0.
 2. Add the **TrideKit** product to your app target (it also exposes the runtime's types — `TrideValue`
    and others; a separate **TrideCore** is only for a target that needs no rendering).
 3. In the target's Build Settings: Excluded Architectures → "+" for Any iOS Simulator SDK → `x86_64`
@@ -195,7 +179,7 @@ its source: `setBinding` on it throws until `unbindInput`. See [Docs/API.md](Doc
 ## Example
 
 `Examples/TridePlayer/TridePlayer.xcodeproj` → Run. It takes the package from this clone and the binaries
-from the same links (needs `~/.netrc`). For an iPhone, pick your Team in Signing & Capabilities. "Open .trd…"
+from the same release links. For an iPhone, pick your Team in Signing & Capabilities. "Open .trd…"
 at the top opens a scene exported from Tride Editor (a file from Files); "Bindings" lists every value and
 trigger of the open scene.
 

@@ -453,7 +453,7 @@ public final class TrideKitScene {
         guard let recordScene else { return [:] }
         let worlds = RecordScene.worlds(of: recordScene.places)
         var out: [String: (place: Int, world: [Double])] = [:]
-        for (id, place) in recordScene.placeOf.merging(recordScene.carrierPlace, uniquingKeysWith: { node, _ in node }) {
+        for (id, place) in recordScene.placeById {
             out[id] = (place, worlds[place])
         }
         return out

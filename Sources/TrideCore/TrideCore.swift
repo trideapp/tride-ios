@@ -848,14 +848,6 @@ public protocol TrideSceneProtocol : AnyObject {
     func listBindings()  -> [TrideBindingDescriptor]
     
     /**
-     * List all authored cameras from `manifest.cameras[]`.
-     * Byte-faithful with [`tride_runtime_api::RuntimeHandle::manifest`];
-     * empty for legacy `.trd` archives without cameras. iOS hosts
-     * enumerate at load and drive `view->setCamera` on the active slug.
-     */
-    func listCameras()  -> [TrideCameraDescriptor]
-    
-    /**
      * Uids of every node drawn bent now.
      */
     func listDeformedNodes()  -> [String]
@@ -865,14 +857,6 @@ public protocol TrideSceneProtocol : AnyObject {
      * `manifest.generators[]`; hosts pair each with its hosting node via `node_uid`.
      */
     func listGenerators()  -> [TrideGeneratorDescriptor]
-    
-    /**
-     * List all authored lights from `manifest.lights[]`.
-     * Byte-faithful with [`tride_runtime_api::RuntimeHandle::manifest`];
-     * empty for legacy `.trd` archives without lights. iOS hosts
-     * enumerate at load to build Filament light entities.
-     */
-    func listLights()  -> [TrideLightDescriptor]
     
     /**
      * Nodes drawn from a parametric datablock, in manifest order — linked
@@ -1686,19 +1670,6 @@ open func listBindings() -> [TrideBindingDescriptor] {
 }
     
     /**
-     * List all authored cameras from `manifest.cameras[]`.
-     * Byte-faithful with [`tride_runtime_api::RuntimeHandle::manifest`];
-     * empty for legacy `.trd` archives without cameras. iOS hosts
-     * enumerate at load and drive `view->setCamera` on the active slug.
-     */
-open func listCameras() -> [TrideCameraDescriptor] {
-    return try!  FfiConverterSequenceTypeTrideCameraDescriptor.lift(try! rustCall() {
-    uniffi_tride_ffi_fn_method_tridescene_list_cameras(self.uniffiClonePointer(),$0
-    )
-})
-}
-    
-    /**
      * Uids of every node drawn bent now.
      */
 open func listDeformedNodes() -> [String] {
@@ -1715,19 +1686,6 @@ open func listDeformedNodes() -> [String] {
 open func listGenerators() -> [TrideGeneratorDescriptor] {
     return try!  FfiConverterSequenceTypeTrideGeneratorDescriptor.lift(try! rustCall() {
     uniffi_tride_ffi_fn_method_tridescene_list_generators(self.uniffiClonePointer(),$0
-    )
-})
-}
-    
-    /**
-     * List all authored lights from `manifest.lights[]`.
-     * Byte-faithful with [`tride_runtime_api::RuntimeHandle::manifest`];
-     * empty for legacy `.trd` archives without lights. iOS hosts
-     * enumerate at load to build Filament light entities.
-     */
-open func listLights() -> [TrideLightDescriptor] {
-    return try!  FfiConverterSequenceTypeTrideLightDescriptor.lift(try! rustCall() {
-    uniffi_tride_ffi_fn_method_tridescene_list_lights(self.uniffiClonePointer(),$0
     )
 })
 }
@@ -3190,285 +3148,6 @@ public func FfiConverterTypeTrideBuildInfo_lift(_ buf: RustBuffer) throws -> Tri
 #endif
 public func FfiConverterTypeTrideBuildInfo_lower(_ value: TrideBuildInfo) -> RustBuffer {
     return FfiConverterTypeTrideBuildInfo.lower(value)
-}
-
-
-/**
- * Authored camera descriptor returned by [`TrideScene::list_cameras`].
- *
- * Byte-faithful projection of one [`tride_schema::CameraNode`] from
- * `manifest.cameras[]`. Projection params are glTF-faithful: perspective
- * carries `yfov` (radians) + `aspect_ratio`, orthographic carries `xmag` /
- * `ymag`; the inactive set is `None`. `zfar = None` means an infinite far
- * plane. `rotation` is **Euler XYZ radians** — Euler→quat happens
- * in the iOS bridge, not here. Array fields mirror
- * [`TrideLightDescriptor`] (length-3 `Vec<f64>`, `Option` presence kept).
- */
-public struct TrideCameraDescriptor {
-    /**
-     * Stable slug id (`manifest.cameras[].id`).
-     */
-    public var id: String
-    /**
-     * Stringified [`tride_schema::CameraKind`] (`"perspective" | "orthographic"`).
-     */
-    public var kind: String
-    /**
-     * Vertical field-of-view in radians (perspective only).
-     */
-    public var yfov: Double?
-    /**
-     * Fixed aspect ratio (perspective only). `None` = viewport-driven.
-     */
-    public var aspectRatio: Double?
-    /**
-     * Horizontal magnification half-size (orthographic only).
-     */
-    public var xmag: Double?
-    /**
-     * Vertical magnification half-size (orthographic only).
-     */
-    public var ymag: Double?
-    /**
-     * Near-plane distance (both projections).
-     */
-    public var znear: Double
-    /**
-     * Far-plane distance. `None` = infinite far plane.
-     */
-    public var zfar: Double?
-    /**
-     * Position, length-3 `[x, y, z]`, local to the node's parent — world when it has none. `None` = origin.
-     */
-    public var position: [Double]?
-    /**
-     * Orientation as **Euler radians by axis**, length-3 `[ex, ey, ez]`, composed in
-     * [`Self::rotation_order`]. `None` = identity.
-     */
-    public var rotation: [Double]?
-    /**
-     * The order `rotation`'s angles compose in: `"xyz"` (`Qx·Qy·Qz`, every camera saved before
-     * the field) or `"yxz"` (heading Y, pitch X, bank Z — a camera the editor or the importer
-     * creates). A host composing the pose itself must honour it.
-     */
-    public var rotationOrder: String
-    /**
-     * glTF node index this camera was imported from (export bake-back). `None` = editor-created.
-     */
-    public var gltfIndex: UInt32?
-    /**
-     * Focus distance in metres along the view axis. `None` = Filament's default.
-     */
-    public var focusDistance: Double?
-    /**
-     * Aperture f-number — the depth-of-field blur only; the bridge keeps the
-     * exposure at f/16, 1/125 s, ISO 100. `None` = f/16.
-     */
-    public var aperture: Double?
-    /**
-     * Node uid kept in focus; overrides `focus_distance` while it resolves.
-     */
-    public var focusTarget: String?
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(
-        /**
-         * Stable slug id (`manifest.cameras[].id`).
-         */id: String, 
-        /**
-         * Stringified [`tride_schema::CameraKind`] (`"perspective" | "orthographic"`).
-         */kind: String, 
-        /**
-         * Vertical field-of-view in radians (perspective only).
-         */yfov: Double?, 
-        /**
-         * Fixed aspect ratio (perspective only). `None` = viewport-driven.
-         */aspectRatio: Double?, 
-        /**
-         * Horizontal magnification half-size (orthographic only).
-         */xmag: Double?, 
-        /**
-         * Vertical magnification half-size (orthographic only).
-         */ymag: Double?, 
-        /**
-         * Near-plane distance (both projections).
-         */znear: Double, 
-        /**
-         * Far-plane distance. `None` = infinite far plane.
-         */zfar: Double?, 
-        /**
-         * Position, length-3 `[x, y, z]`, local to the node's parent — world when it has none. `None` = origin.
-         */position: [Double]?, 
-        /**
-         * Orientation as **Euler radians by axis**, length-3 `[ex, ey, ez]`, composed in
-         * [`Self::rotation_order`]. `None` = identity.
-         */rotation: [Double]?, 
-        /**
-         * The order `rotation`'s angles compose in: `"xyz"` (`Qx·Qy·Qz`, every camera saved before
-         * the field) or `"yxz"` (heading Y, pitch X, bank Z — a camera the editor or the importer
-         * creates). A host composing the pose itself must honour it.
-         */rotationOrder: String, 
-        /**
-         * glTF node index this camera was imported from (export bake-back). `None` = editor-created.
-         */gltfIndex: UInt32?, 
-        /**
-         * Focus distance in metres along the view axis. `None` = Filament's default.
-         */focusDistance: Double?, 
-        /**
-         * Aperture f-number — the depth-of-field blur only; the bridge keeps the
-         * exposure at f/16, 1/125 s, ISO 100. `None` = f/16.
-         */aperture: Double?, 
-        /**
-         * Node uid kept in focus; overrides `focus_distance` while it resolves.
-         */focusTarget: String?) {
-        self.id = id
-        self.kind = kind
-        self.yfov = yfov
-        self.aspectRatio = aspectRatio
-        self.xmag = xmag
-        self.ymag = ymag
-        self.znear = znear
-        self.zfar = zfar
-        self.position = position
-        self.rotation = rotation
-        self.rotationOrder = rotationOrder
-        self.gltfIndex = gltfIndex
-        self.focusDistance = focusDistance
-        self.aperture = aperture
-        self.focusTarget = focusTarget
-    }
-}
-
-
-
-extension TrideCameraDescriptor: Equatable, Hashable {
-    public static func ==(lhs: TrideCameraDescriptor, rhs: TrideCameraDescriptor) -> Bool {
-        if lhs.id != rhs.id {
-            return false
-        }
-        if lhs.kind != rhs.kind {
-            return false
-        }
-        if lhs.yfov != rhs.yfov {
-            return false
-        }
-        if lhs.aspectRatio != rhs.aspectRatio {
-            return false
-        }
-        if lhs.xmag != rhs.xmag {
-            return false
-        }
-        if lhs.ymag != rhs.ymag {
-            return false
-        }
-        if lhs.znear != rhs.znear {
-            return false
-        }
-        if lhs.zfar != rhs.zfar {
-            return false
-        }
-        if lhs.position != rhs.position {
-            return false
-        }
-        if lhs.rotation != rhs.rotation {
-            return false
-        }
-        if lhs.rotationOrder != rhs.rotationOrder {
-            return false
-        }
-        if lhs.gltfIndex != rhs.gltfIndex {
-            return false
-        }
-        if lhs.focusDistance != rhs.focusDistance {
-            return false
-        }
-        if lhs.aperture != rhs.aperture {
-            return false
-        }
-        if lhs.focusTarget != rhs.focusTarget {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-        hasher.combine(kind)
-        hasher.combine(yfov)
-        hasher.combine(aspectRatio)
-        hasher.combine(xmag)
-        hasher.combine(ymag)
-        hasher.combine(znear)
-        hasher.combine(zfar)
-        hasher.combine(position)
-        hasher.combine(rotation)
-        hasher.combine(rotationOrder)
-        hasher.combine(gltfIndex)
-        hasher.combine(focusDistance)
-        hasher.combine(aperture)
-        hasher.combine(focusTarget)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeTrideCameraDescriptor: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideCameraDescriptor {
-        return
-            try TrideCameraDescriptor(
-                id: FfiConverterString.read(from: &buf), 
-                kind: FfiConverterString.read(from: &buf), 
-                yfov: FfiConverterOptionDouble.read(from: &buf), 
-                aspectRatio: FfiConverterOptionDouble.read(from: &buf), 
-                xmag: FfiConverterOptionDouble.read(from: &buf), 
-                ymag: FfiConverterOptionDouble.read(from: &buf), 
-                znear: FfiConverterDouble.read(from: &buf), 
-                zfar: FfiConverterOptionDouble.read(from: &buf), 
-                position: FfiConverterOptionSequenceDouble.read(from: &buf), 
-                rotation: FfiConverterOptionSequenceDouble.read(from: &buf), 
-                rotationOrder: FfiConverterString.read(from: &buf), 
-                gltfIndex: FfiConverterOptionUInt32.read(from: &buf), 
-                focusDistance: FfiConverterOptionDouble.read(from: &buf), 
-                aperture: FfiConverterOptionDouble.read(from: &buf), 
-                focusTarget: FfiConverterOptionString.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: TrideCameraDescriptor, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.id, into: &buf)
-        FfiConverterString.write(value.kind, into: &buf)
-        FfiConverterOptionDouble.write(value.yfov, into: &buf)
-        FfiConverterOptionDouble.write(value.aspectRatio, into: &buf)
-        FfiConverterOptionDouble.write(value.xmag, into: &buf)
-        FfiConverterOptionDouble.write(value.ymag, into: &buf)
-        FfiConverterDouble.write(value.znear, into: &buf)
-        FfiConverterOptionDouble.write(value.zfar, into: &buf)
-        FfiConverterOptionSequenceDouble.write(value.position, into: &buf)
-        FfiConverterOptionSequenceDouble.write(value.rotation, into: &buf)
-        FfiConverterString.write(value.rotationOrder, into: &buf)
-        FfiConverterOptionUInt32.write(value.gltfIndex, into: &buf)
-        FfiConverterOptionDouble.write(value.focusDistance, into: &buf)
-        FfiConverterOptionDouble.write(value.aperture, into: &buf)
-        FfiConverterOptionString.write(value.focusTarget, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeTrideCameraDescriptor_lift(_ buf: RustBuffer) throws -> TrideCameraDescriptor {
-    return try FfiConverterTypeTrideCameraDescriptor.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeTrideCameraDescriptor_lower(_ value: TrideCameraDescriptor) -> RustBuffer {
-    return FfiConverterTypeTrideCameraDescriptor.lower(value)
 }
 
 
@@ -5726,229 +5405,6 @@ public func FfiConverterTypeTrideInputMapping_lift(_ buf: RustBuffer) throws -> 
 #endif
 public func FfiConverterTypeTrideInputMapping_lower(_ value: TrideInputMapping) -> RustBuffer {
     return FfiConverterTypeTrideInputMapping.lower(value)
-}
-
-
-/**
- * Authored light descriptor returned by [`TrideScene::list_lights`].
- *
- * Byte-faithful projection of one [`tride_schema::LightNode`] from
- * `manifest.lights[]` — every field copies the manifest value verbatim,
- * no lossy conversion. In particular `rotation` is **Euler XYZ-intrinsic
- * radians** `[ex, ey, ez]`; the iOS bridge
- * composes Euler→quat and rotates `-Z` for the emission direction
- * (the host's boundary), **not** here. `None` `position` / `rotation` mean
- * origin / identity (same semantics as the manifest `Option`).
- *
- * Array fields use length-3 `Vec<f64>` (matching the
- * [`TrideValue::Vec3`] neighbour) and keep the manifest's `Option`
- * presence so consumers can distinguish "unset" from "at origin".
- */
-public struct TrideLightDescriptor {
-    /**
-     * Stable slug id (`manifest.lights[].id`).
-     */
-    public var id: String
-    /**
-     * Stringified [`tride_schema::LightType`] (`"directional" | "point" | "spot"`).
-     */
-    public var lightType: String
-    /**
-     * RGB linear color, length-3 `[r, g, b]`.
-     */
-    public var color: [Double]
-    /**
-     * Illuminance (lux, directional) or luminous intensity (candela, point/spot).
-     */
-    public var intensity: Double
-    /**
-     * The radius a point / spot light reaches, metres — its own `range`, else the core's Auto
-     * from its intensity, `(intensity / 0.05)^¼`: what the host passes to `setFalloff`. `None`
-     * for a directional light.
-     */
-    public var range: Double?
-    /**
-     * Inner cone half-angle in radians (spot only).
-     */
-    public var innerConeAngle: Double?
-    /**
-     * Outer cone half-angle in radians (spot only).
-     */
-    public var outerConeAngle: Double?
-    /**
-     * Shadow caster flag; `None` = platform default (directional/spot cast, point does not).
-     */
-    public var castShadows: Bool?
-    /**
-     * Position, length-3 `[x, y, z]`, local to the node's parent — world when it has none. `None` = origin.
-     */
-    public var position: [Double]?
-    /**
-     * Orientation as **Euler XYZ radians**, length-3 `[ex, ey, ez]`. `None` = identity.
-     */
-    public var rotation: [Double]?
-    /**
-     * glTF node index this light was imported from (export bake-back). `None` = editor-created.
-     */
-    public var gltfIndex: UInt32?
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(
-        /**
-         * Stable slug id (`manifest.lights[].id`).
-         */id: String, 
-        /**
-         * Stringified [`tride_schema::LightType`] (`"directional" | "point" | "spot"`).
-         */lightType: String, 
-        /**
-         * RGB linear color, length-3 `[r, g, b]`.
-         */color: [Double], 
-        /**
-         * Illuminance (lux, directional) or luminous intensity (candela, point/spot).
-         */intensity: Double, 
-        /**
-         * The radius a point / spot light reaches, metres — its own `range`, else the core's Auto
-         * from its intensity, `(intensity / 0.05)^¼`: what the host passes to `setFalloff`. `None`
-         * for a directional light.
-         */range: Double?, 
-        /**
-         * Inner cone half-angle in radians (spot only).
-         */innerConeAngle: Double?, 
-        /**
-         * Outer cone half-angle in radians (spot only).
-         */outerConeAngle: Double?, 
-        /**
-         * Shadow caster flag; `None` = platform default (directional/spot cast, point does not).
-         */castShadows: Bool?, 
-        /**
-         * Position, length-3 `[x, y, z]`, local to the node's parent — world when it has none. `None` = origin.
-         */position: [Double]?, 
-        /**
-         * Orientation as **Euler XYZ radians**, length-3 `[ex, ey, ez]`. `None` = identity.
-         */rotation: [Double]?, 
-        /**
-         * glTF node index this light was imported from (export bake-back). `None` = editor-created.
-         */gltfIndex: UInt32?) {
-        self.id = id
-        self.lightType = lightType
-        self.color = color
-        self.intensity = intensity
-        self.range = range
-        self.innerConeAngle = innerConeAngle
-        self.outerConeAngle = outerConeAngle
-        self.castShadows = castShadows
-        self.position = position
-        self.rotation = rotation
-        self.gltfIndex = gltfIndex
-    }
-}
-
-
-
-extension TrideLightDescriptor: Equatable, Hashable {
-    public static func ==(lhs: TrideLightDescriptor, rhs: TrideLightDescriptor) -> Bool {
-        if lhs.id != rhs.id {
-            return false
-        }
-        if lhs.lightType != rhs.lightType {
-            return false
-        }
-        if lhs.color != rhs.color {
-            return false
-        }
-        if lhs.intensity != rhs.intensity {
-            return false
-        }
-        if lhs.range != rhs.range {
-            return false
-        }
-        if lhs.innerConeAngle != rhs.innerConeAngle {
-            return false
-        }
-        if lhs.outerConeAngle != rhs.outerConeAngle {
-            return false
-        }
-        if lhs.castShadows != rhs.castShadows {
-            return false
-        }
-        if lhs.position != rhs.position {
-            return false
-        }
-        if lhs.rotation != rhs.rotation {
-            return false
-        }
-        if lhs.gltfIndex != rhs.gltfIndex {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-        hasher.combine(lightType)
-        hasher.combine(color)
-        hasher.combine(intensity)
-        hasher.combine(range)
-        hasher.combine(innerConeAngle)
-        hasher.combine(outerConeAngle)
-        hasher.combine(castShadows)
-        hasher.combine(position)
-        hasher.combine(rotation)
-        hasher.combine(gltfIndex)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeTrideLightDescriptor: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideLightDescriptor {
-        return
-            try TrideLightDescriptor(
-                id: FfiConverterString.read(from: &buf), 
-                lightType: FfiConverterString.read(from: &buf), 
-                color: FfiConverterSequenceDouble.read(from: &buf), 
-                intensity: FfiConverterDouble.read(from: &buf), 
-                range: FfiConverterOptionDouble.read(from: &buf), 
-                innerConeAngle: FfiConverterOptionDouble.read(from: &buf), 
-                outerConeAngle: FfiConverterOptionDouble.read(from: &buf), 
-                castShadows: FfiConverterOptionBool.read(from: &buf), 
-                position: FfiConverterOptionSequenceDouble.read(from: &buf), 
-                rotation: FfiConverterOptionSequenceDouble.read(from: &buf), 
-                gltfIndex: FfiConverterOptionUInt32.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: TrideLightDescriptor, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.id, into: &buf)
-        FfiConverterString.write(value.lightType, into: &buf)
-        FfiConverterSequenceDouble.write(value.color, into: &buf)
-        FfiConverterDouble.write(value.intensity, into: &buf)
-        FfiConverterOptionDouble.write(value.range, into: &buf)
-        FfiConverterOptionDouble.write(value.innerConeAngle, into: &buf)
-        FfiConverterOptionDouble.write(value.outerConeAngle, into: &buf)
-        FfiConverterOptionBool.write(value.castShadows, into: &buf)
-        FfiConverterOptionSequenceDouble.write(value.position, into: &buf)
-        FfiConverterOptionSequenceDouble.write(value.rotation, into: &buf)
-        FfiConverterOptionUInt32.write(value.gltfIndex, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeTrideLightDescriptor_lift(_ buf: RustBuffer) throws -> TrideLightDescriptor {
-    return try FfiConverterTypeTrideLightDescriptor.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeTrideLightDescriptor_lower(_ value: TrideLightDescriptor) -> RustBuffer {
-    return FfiConverterTypeTrideLightDescriptor.lower(value)
 }
 
 
@@ -8258,28 +7714,25 @@ public func FfiConverterTypeTridePulseTable_lower(_ value: TridePulseTable) -> R
 
 
 /**
- * One camera of [`TrideSceneRecord`]: parameters as [`TrideCameraDescriptor`], its parent and
- * focus rows, the pose as a quaternion from the core (its rotation order composed).
+ * One camera of [`TrideSceneRecord`]: the lens as drawn (`aspect_ratio` `None` = the view's) and
+ * its focus row. Its place is the node row naming it ([`TrideRecordNode::camera`]).
  */
 public struct TrideRecordCamera {
     public var id: String
     public var kind: String
-    public var yfov: Double?
+    public var yfov: Double
     public var aspectRatio: Double?
-    public var xmag: Double?
-    public var ymag: Double?
+    public var xmag: Double
+    public var ymag: Double
     public var znear: Double
-    public var zfar: Double?
-    public var focusDistance: Double?
-    public var aperture: Double?
+    public var zfar: Double
+    public var focusDistance: Double
+    public var aperture: Double
     public var focusTarget: UInt32?
-    public var parent: UInt32?
-    public var translation: [Double]
-    public var rotation: [Double]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, kind: String, yfov: Double?, aspectRatio: Double?, xmag: Double?, ymag: Double?, znear: Double, zfar: Double?, focusDistance: Double?, aperture: Double?, focusTarget: UInt32?, parent: UInt32?, translation: [Double], rotation: [Double]) {
+    public init(id: String, kind: String, yfov: Double, aspectRatio: Double?, xmag: Double, ymag: Double, znear: Double, zfar: Double, focusDistance: Double, aperture: Double, focusTarget: UInt32?) {
         self.id = id
         self.kind = kind
         self.yfov = yfov
@@ -8291,9 +7744,6 @@ public struct TrideRecordCamera {
         self.focusDistance = focusDistance
         self.aperture = aperture
         self.focusTarget = focusTarget
-        self.parent = parent
-        self.translation = translation
-        self.rotation = rotation
     }
 }
 
@@ -8334,15 +7784,6 @@ extension TrideRecordCamera: Equatable, Hashable {
         if lhs.focusTarget != rhs.focusTarget {
             return false
         }
-        if lhs.parent != rhs.parent {
-            return false
-        }
-        if lhs.translation != rhs.translation {
-            return false
-        }
-        if lhs.rotation != rhs.rotation {
-            return false
-        }
         return true
     }
 
@@ -8358,9 +7799,6 @@ extension TrideRecordCamera: Equatable, Hashable {
         hasher.combine(focusDistance)
         hasher.combine(aperture)
         hasher.combine(focusTarget)
-        hasher.combine(parent)
-        hasher.combine(translation)
-        hasher.combine(rotation)
     }
 }
 
@@ -8374,36 +7812,30 @@ public struct FfiConverterTypeTrideRecordCamera: FfiConverterRustBuffer {
             try TrideRecordCamera(
                 id: FfiConverterString.read(from: &buf), 
                 kind: FfiConverterString.read(from: &buf), 
-                yfov: FfiConverterOptionDouble.read(from: &buf), 
+                yfov: FfiConverterDouble.read(from: &buf), 
                 aspectRatio: FfiConverterOptionDouble.read(from: &buf), 
-                xmag: FfiConverterOptionDouble.read(from: &buf), 
-                ymag: FfiConverterOptionDouble.read(from: &buf), 
+                xmag: FfiConverterDouble.read(from: &buf), 
+                ymag: FfiConverterDouble.read(from: &buf), 
                 znear: FfiConverterDouble.read(from: &buf), 
-                zfar: FfiConverterOptionDouble.read(from: &buf), 
-                focusDistance: FfiConverterOptionDouble.read(from: &buf), 
-                aperture: FfiConverterOptionDouble.read(from: &buf), 
-                focusTarget: FfiConverterOptionUInt32.read(from: &buf), 
-                parent: FfiConverterOptionUInt32.read(from: &buf), 
-                translation: FfiConverterSequenceDouble.read(from: &buf), 
-                rotation: FfiConverterSequenceDouble.read(from: &buf)
+                zfar: FfiConverterDouble.read(from: &buf), 
+                focusDistance: FfiConverterDouble.read(from: &buf), 
+                aperture: FfiConverterDouble.read(from: &buf), 
+                focusTarget: FfiConverterOptionUInt32.read(from: &buf)
         )
     }
 
     public static func write(_ value: TrideRecordCamera, into buf: inout [UInt8]) {
         FfiConverterString.write(value.id, into: &buf)
         FfiConverterString.write(value.kind, into: &buf)
-        FfiConverterOptionDouble.write(value.yfov, into: &buf)
+        FfiConverterDouble.write(value.yfov, into: &buf)
         FfiConverterOptionDouble.write(value.aspectRatio, into: &buf)
-        FfiConverterOptionDouble.write(value.xmag, into: &buf)
-        FfiConverterOptionDouble.write(value.ymag, into: &buf)
+        FfiConverterDouble.write(value.xmag, into: &buf)
+        FfiConverterDouble.write(value.ymag, into: &buf)
         FfiConverterDouble.write(value.znear, into: &buf)
-        FfiConverterOptionDouble.write(value.zfar, into: &buf)
-        FfiConverterOptionDouble.write(value.focusDistance, into: &buf)
-        FfiConverterOptionDouble.write(value.aperture, into: &buf)
+        FfiConverterDouble.write(value.zfar, into: &buf)
+        FfiConverterDouble.write(value.focusDistance, into: &buf)
+        FfiConverterDouble.write(value.aperture, into: &buf)
         FfiConverterOptionUInt32.write(value.focusTarget, into: &buf)
-        FfiConverterOptionUInt32.write(value.parent, into: &buf)
-        FfiConverterSequenceDouble.write(value.translation, into: &buf)
-        FfiConverterSequenceDouble.write(value.rotation, into: &buf)
     }
 }
 
@@ -8588,25 +8020,23 @@ public func FfiConverterTypeTrideRecordImage_lower(_ value: TrideRecordImage) ->
 
 
 /**
- * One light of [`TrideSceneRecord`]: parameters as [`TrideLightDescriptor`], its parent row,
- * the pose as a quaternion from the core.
+ * One light of [`TrideSceneRecord`]: parameters as drawn (the core fills what the file leaves
+ * out; `range` 0 for a directional light). Its place is the node row naming it
+ * ([`TrideRecordNode::light`]).
  */
 public struct TrideRecordLight {
     public var id: String
     public var lightType: String
     public var color: [Double]
     public var intensity: Double
-    public var range: Double?
-    public var innerConeAngle: Double?
-    public var outerConeAngle: Double?
-    public var castShadows: Bool?
-    public var parent: UInt32?
-    public var translation: [Double]
-    public var rotation: [Double]
+    public var range: Double
+    public var innerConeAngle: Double
+    public var outerConeAngle: Double
+    public var castShadows: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, lightType: String, color: [Double], intensity: Double, range: Double?, innerConeAngle: Double?, outerConeAngle: Double?, castShadows: Bool?, parent: UInt32?, translation: [Double], rotation: [Double]) {
+    public init(id: String, lightType: String, color: [Double], intensity: Double, range: Double, innerConeAngle: Double, outerConeAngle: Double, castShadows: Bool) {
         self.id = id
         self.lightType = lightType
         self.color = color
@@ -8615,9 +8045,6 @@ public struct TrideRecordLight {
         self.innerConeAngle = innerConeAngle
         self.outerConeAngle = outerConeAngle
         self.castShadows = castShadows
-        self.parent = parent
-        self.translation = translation
-        self.rotation = rotation
     }
 }
 
@@ -8649,15 +8076,6 @@ extension TrideRecordLight: Equatable, Hashable {
         if lhs.castShadows != rhs.castShadows {
             return false
         }
-        if lhs.parent != rhs.parent {
-            return false
-        }
-        if lhs.translation != rhs.translation {
-            return false
-        }
-        if lhs.rotation != rhs.rotation {
-            return false
-        }
         return true
     }
 
@@ -8670,9 +8088,6 @@ extension TrideRecordLight: Equatable, Hashable {
         hasher.combine(innerConeAngle)
         hasher.combine(outerConeAngle)
         hasher.combine(castShadows)
-        hasher.combine(parent)
-        hasher.combine(translation)
-        hasher.combine(rotation)
     }
 }
 
@@ -8688,13 +8103,10 @@ public struct FfiConverterTypeTrideRecordLight: FfiConverterRustBuffer {
                 lightType: FfiConverterString.read(from: &buf), 
                 color: FfiConverterSequenceDouble.read(from: &buf), 
                 intensity: FfiConverterDouble.read(from: &buf), 
-                range: FfiConverterOptionDouble.read(from: &buf), 
-                innerConeAngle: FfiConverterOptionDouble.read(from: &buf), 
-                outerConeAngle: FfiConverterOptionDouble.read(from: &buf), 
-                castShadows: FfiConverterOptionBool.read(from: &buf), 
-                parent: FfiConverterOptionUInt32.read(from: &buf), 
-                translation: FfiConverterSequenceDouble.read(from: &buf), 
-                rotation: FfiConverterSequenceDouble.read(from: &buf)
+                range: FfiConverterDouble.read(from: &buf), 
+                innerConeAngle: FfiConverterDouble.read(from: &buf), 
+                outerConeAngle: FfiConverterDouble.read(from: &buf), 
+                castShadows: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -8703,13 +8115,10 @@ public struct FfiConverterTypeTrideRecordLight: FfiConverterRustBuffer {
         FfiConverterString.write(value.lightType, into: &buf)
         FfiConverterSequenceDouble.write(value.color, into: &buf)
         FfiConverterDouble.write(value.intensity, into: &buf)
-        FfiConverterOptionDouble.write(value.range, into: &buf)
-        FfiConverterOptionDouble.write(value.innerConeAngle, into: &buf)
-        FfiConverterOptionDouble.write(value.outerConeAngle, into: &buf)
-        FfiConverterOptionBool.write(value.castShadows, into: &buf)
-        FfiConverterOptionUInt32.write(value.parent, into: &buf)
-        FfiConverterSequenceDouble.write(value.translation, into: &buf)
-        FfiConverterSequenceDouble.write(value.rotation, into: &buf)
+        FfiConverterDouble.write(value.range, into: &buf)
+        FfiConverterDouble.write(value.innerConeAngle, into: &buf)
+        FfiConverterDouble.write(value.outerConeAngle, into: &buf)
+        FfiConverterBool.write(value.castShadows, into: &buf)
     }
 }
 
@@ -8999,6 +8408,14 @@ public struct TrideRecordNode {
      * The generator it hosts (slug).
      */
     public var generator: String?
+    /**
+     * The light it holds (slug, [`TrideRecordLight::id`]).
+     */
+    public var light: String?
+    /**
+     * The camera it holds (slug, [`TrideRecordCamera::id`]).
+     */
+    public var camera: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -9030,7 +8447,13 @@ public struct TrideRecordNode {
          */weights: [Double], 
         /**
          * The generator it hosts (slug).
-         */generator: String?) {
+         */generator: String?, 
+        /**
+         * The light it holds (slug, [`TrideRecordLight::id`]).
+         */light: String?, 
+        /**
+         * The camera it holds (slug, [`TrideRecordCamera::id`]).
+         */camera: String?) {
         self.uid = uid
         self.name = name
         self.kind = kind
@@ -9044,6 +8467,8 @@ public struct TrideRecordNode {
         self.skin = skin
         self.weights = weights
         self.generator = generator
+        self.light = light
+        self.camera = camera
     }
 }
 
@@ -9090,6 +8515,12 @@ extension TrideRecordNode: Equatable, Hashable {
         if lhs.generator != rhs.generator {
             return false
         }
+        if lhs.light != rhs.light {
+            return false
+        }
+        if lhs.camera != rhs.camera {
+            return false
+        }
         return true
     }
 
@@ -9107,6 +8538,8 @@ extension TrideRecordNode: Equatable, Hashable {
         hasher.combine(skin)
         hasher.combine(weights)
         hasher.combine(generator)
+        hasher.combine(light)
+        hasher.combine(camera)
     }
 }
 
@@ -9130,7 +8563,9 @@ public struct FfiConverterTypeTrideRecordNode: FfiConverterRustBuffer {
                 datablock: FfiConverterOptionString.read(from: &buf), 
                 skin: FfiConverterOptionUInt32.read(from: &buf), 
                 weights: FfiConverterSequenceDouble.read(from: &buf), 
-                generator: FfiConverterOptionString.read(from: &buf)
+                generator: FfiConverterOptionString.read(from: &buf), 
+                light: FfiConverterOptionString.read(from: &buf), 
+                camera: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -9148,6 +8583,8 @@ public struct FfiConverterTypeTrideRecordNode: FfiConverterRustBuffer {
         FfiConverterOptionUInt32.write(value.skin, into: &buf)
         FfiConverterSequenceDouble.write(value.weights, into: &buf)
         FfiConverterOptionString.write(value.generator, into: &buf)
+        FfiConverterOptionString.write(value.light, into: &buf)
+        FfiConverterOptionString.write(value.camera, into: &buf)
     }
 }
 
@@ -13928,31 +13365,6 @@ fileprivate struct FfiConverterSequenceTypeTrideBoundInput: FfiConverterRustBuff
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterSequenceTypeTrideCameraDescriptor: FfiConverterRustBuffer {
-    typealias SwiftType = [TrideCameraDescriptor]
-
-    public static func write(_ value: [TrideCameraDescriptor], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeTrideCameraDescriptor.write(item, into: &buf)
-        }
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TrideCameraDescriptor] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [TrideCameraDescriptor]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            seq.append(try FfiConverterTypeTrideCameraDescriptor.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
 fileprivate struct FfiConverterSequenceTypeTrideDatablockPart: FfiConverterRustBuffer {
     typealias SwiftType = [TrideDatablockPart]
 
@@ -14020,31 +13432,6 @@ fileprivate struct FfiConverterSequenceTypeTrideGeometryGroup: FfiConverterRustB
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeTrideGeometryGroup.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterSequenceTypeTrideLightDescriptor: FfiConverterRustBuffer {
-    typealias SwiftType = [TrideLightDescriptor]
-
-    public static func write(_ value: [TrideLightDescriptor], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeTrideLightDescriptor.write(item, into: &buf)
-        }
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TrideLightDescriptor] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [TrideLightDescriptor]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            seq.append(try FfiConverterTypeTrideLightDescriptor.read(from: &buf))
         }
         return seq
     }
@@ -14690,9 +14077,8 @@ public func deformersCorpusObserve(fixtureJson: String) -> String {
 /**
  * Unit quaternion `[x, y, z, w]` of Euler angles `euler` (radians, by axis `[x, y, z]`)
  * composed in `order` (`"xyz"` / `"yxz"`) — the core's one composition
- * (`tride_schema::euler_to_quat`, `libm`), for a host placing a camera from its descriptor and
- * its per-axis lanes in the camera's [`TrideCameraDescriptor::rotation_order`] instead of a
- * composition of its own. An unknown order or a `euler` that is not 3 numbers gives an empty
+ * (`tride_schema::euler_to_quat`, `libm`), for a host composing a node's per-axis lanes in the
+ * node's order instead of a composition of its own. An unknown order or a `euler` that is not 3 numbers gives an empty
  * list — a host bug, never a silent guess.
  */
 public func eulerToQuat(euler: [Double], order: String) -> [Double] {
@@ -14902,7 +14288,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_tride_ffi_checksum_func_deformers_corpus_observe() != 1755) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_tride_ffi_checksum_func_euler_to_quat() != 59573) {
+    if (uniffi_tride_ffi_checksum_func_euler_to_quat() != 25503) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tride_ffi_checksum_func_inputs_corpus_observe() != 63565) {
@@ -15046,16 +14432,10 @@ private var initializationResult: InitializationResult = {
     if (uniffi_tride_ffi_checksum_method_tridescene_list_bindings() != 19929) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_tride_ffi_checksum_method_tridescene_list_cameras() != 62130) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_tride_ffi_checksum_method_tridescene_list_deformed_nodes() != 18167) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tride_ffi_checksum_method_tridescene_list_generators() != 55859) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_tride_ffi_checksum_method_tridescene_list_lights() != 15176) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tride_ffi_checksum_method_tridescene_list_parametric_nodes() != 53329) {

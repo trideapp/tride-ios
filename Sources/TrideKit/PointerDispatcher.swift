@@ -8,19 +8,19 @@
 ///   quaternion `[qx, qy, qz, qw]` (read verbatim into `simd_quatf`); a 3-component Euler XYZ value
 ///   (radians) from older manifests is still accepted, with a warn-once notice in OSLog.
 ///   A node's rotation arrives whole, as the core composed it: no node axis is
-///   composed here. Euler XYZ ↔ quaternion (light directions) is the core's (`eulerToQuat`).
-/// - A light / camera is posed through its carrier place (`RecordScene.carrierPlace`) — spatial
-///   channels write the carrier
-///   TRS via the index-based node path; the Light / Camera components stay at identity. Its LOCAL
-///   pose is held between batches (authored at bind): a lane patches one axis of the held pose, so
-///   an axis a batch does not carry keeps its last value while another moves; a complete batch
-///   starts from the authored pose again. Its angles turn into a quaternion in the record's own
-///   order (a camera's `rotationOrder`) through the core's `eulerToQuat` — never composed here.
-///   Cameras are materialised from `listCameras` + `activeCamera`; `/scene/active_camera`
-///   switches the View (hard cut).
-/// - A batch carries only changed channels, so a value stays until written again. Where
-///   the bridge needs a partner value (cone inner / outer, camera projection) it takes the one it
-///   last applied; a generator whose `trunkEpoch` did not move gets its transforms, not its mesh.
+///   composed here. Euler XYZ → quaternion (a 3-component value) is the core's (`eulerToQuat`).
+/// - A light / camera is a node: its Light component sits on the place of the node that holds it
+///   (`RecordScene.lightPlace`), its Camera follows that place's world without the scaling
+///   (`cameraPlace`), built from the record's
+///   resolved parameters (`TrideRecordLight` / `TrideRecordCamera`) — no defaults of the view's own.
+///   Its pose and visibility are the node's (`/node/{uid}/translation|rotation|scale|drawVisible`):
+///   a hidden node darkens its light. `/lights/{id}` and `/cameras/{id}` lanes carry parameters
+///   only; a pose lane there has no path (a problem, said once).
+///   `activeCamera` seeds the View, `/scene/active_camera` switches it (hard cut).
+/// - A batch carries only changed channels, so a value stays until written again. The core sends
+///   paired values as a pair (both cones, the colour whole, near with far); a lone one takes its
+///   partner from what the view draws now (seeded from the record, advanced by every write), never
+///   the authored value; a generator whose `trunkEpoch` did not move gets its transforms, not its mesh.
 /// - A complete batch (`complete:` — the core's whole frame after a reset) returns an animated
 ///   render setting it does not carry (saturation, fog colour, bloom strength, pixelation switch and
 ///   size) to the scene's own. A pixelation write of the wrong shape (a switch that is not true /
@@ -51,7 +51,7 @@
 ///   instances of the slug that declare it — nothing composed here. A file mesh's instance takes
 ///   only this: the look recolours the built-in instances (generated meshes, module batches).
 /// - The scene is the one the view built from the core's record (`bind(to:record:)`): a node's
-///   place is its row, a light's / camera's its carrier place (`RecordScene`) — the same index-based bridge
+///   place is its row, a light's / camera's its node's row (`RecordScene`) — the same index-based bridge
 ///   path, never a name or a glTF index; reads back from the core go by uid. Every node with a
 ///   datablock draws the core's mesh under its row: a file mesh in the record's materials on the
 ///   mesh family (`setStandardMaterials`) with its parts and morph targets (`/weights/{n}` of the
@@ -164,23 +164,13 @@ final class PointerDispatcher {
     }
 
     /// Property channel of a `/cameras/{slug}/…` pointer.
-    /// `position` also accepts the editor grammar's `translation` alias.
     enum CameraChannel: Equatable {
-        case position(component: Int?)
-        case rotation(component: Int?)
         case yfov
         case znear
         case zfar
         /// The focus plane (m) and the f-number of the depth of field.
         case focusDistance
         case aperture
-    }
-
-    /// Spatial lane shared by carrier-anchored lights AND cameras: both write
-    /// the same carrier TRS.
-    enum SpatialChannel: Equatable {
-        case position(component: Int?)
-        case rotation(component: Int?)
     }
 
     /// Animatable channel of an `/environment_settings/…` pointer.
@@ -207,16 +197,13 @@ final class PointerDispatcher {
     }
 
     /// Property channel of a `/lights/{slug}/…` pointer. `component == nil`
-    /// addresses the whole vector; a non-nil component is a per-axis dotted
-    /// pointer (`rotation.x`, `color.g`, …) emitted by the runtime.
+    /// addresses the whole colour; a non-nil component is one lane (`color.g`, `color/1`).
     enum LightChannel: Equatable {
         case color(component: Int?)
         case intensity
         case range
         case innerCone
         case outerCone
-        case rotation(component: Int?)
-        case position(component: Int?)
     }
 
     private let scene: TrideScene
@@ -229,37 +216,22 @@ final class PointerDispatcher {
     /// (~100 a tick in a typical scene); parsing them again cost ~1 ms of an iPhone 13's frame.
     /// A pointer's kind only depends on `nodeIdToGltfIndex`, so `bind(to:)` starts it afresh.
     private var kindByPointer: [String: DispatchKind] = [:]
-    /// Morph weight vectors held for the life of the scene, per node index (a lane absent from a
-    /// batch says nothing, so lanes written by different sources survive each other).
-    private var heldMorphWeights: [Int: [Float]] = [:]
-
-    /// Manifest light slug → descriptor, cached at `bind(to:)`.
-    /// Supplies base values when the runtime emits a partial per-axis
-    /// channel (`rotation.x`) so the bridge applies the full vector.
-    private var lightDescriptors: [String: TrideLightDescriptor] = [:]
-
-    /// Light / camera slug → its carrier place (`RecordScene.carrierPlace`): the one
-    /// TransformManager node the entity owns. Spatial channels of a carried entity
-    /// are written to that node through the same index-based TRS path mesh nodes
-    /// use; a light without a carrier keeps the LightManager overlay path.
-    private var carrierIndexById: [String: Int] = [:]
-
-    /// Carrier slug → the authored LOCAL pose (`bind(to:)`, from the light / camera descriptor) and
-    /// → the pose the batches moved it to: the one pose of the carrier, held between batches.
-    private var authoredCarrierPoses: [String: CarrierPose] = [:]
-    private(set) var carrierPoses: [String: CarrierPose] = [:]
+    /// Morph weight vectors held for the life of the scene, per node place, seeded at the node's rest.
+    private var heldMorphWeights = MorphWeightHolder()
+    /// Morph targets of the file mesh drawn under each place (Filament's, at most 256), set at upload.
+    private var morphTargetCounts: [Int: Int] = [:]
+    /// `place` / `place/lane` of the morph writes already reported as drawing nothing.
+    private var morphWriteWarned: Set<String> = []
 
     /// warn-once latch: a part of a node's rotation reached the host (the core sends it whole).
     private var nodeRotationPartWarned = false
 
-    /// Manifest camera slug → descriptor, cached at `bind(to:)`.
-    /// Supplies base values for partial per-axis channels and lens fallbacks.
-    private var cameraDescriptors: [String: TrideCameraDescriptor] = [:]
-
-    /// warn-once latch: a camera spatial mutation with no carrier to write.
-    private var warnedCarrierlessCameras: Set<String> = []
-    /// warn-once latch: a carrier whose rotation order the core does not know.
-    private var warnedUnknownRotationOrders: Set<String> = []
+    /// The colour, cone and projection each light / camera is drawn with now: seeded from the
+    /// record at bind, advanced by every write — where a lone lane or a lone half of a pair takes
+    /// the rest from (the core sends pairs whole).
+    private var liveColor: [String: SIMD3<Float>] = [:]
+    private var liveCone: [String: (inner: Float, outer: Float)] = [:]
+    private var liveProjection: [String: (yfov: Float, znear: Float, zfar: Float)] = [:]
 
     /// Authored HDR env base orientation (Euler XYZ radians), cached at
     /// `bind(to:)` from `scene.environment()`. Seeds the missing axes when the
@@ -296,36 +268,17 @@ final class PointerDispatcher {
         self.scene = scene
     }
 
-    /// Per-tick accumulation of light-channel mutations for one slug.
-    /// Partial per-axis channels (`rotation.x`) seed the missing axes from
-    /// the cached descriptor so the bridge always receives a full vector.
+    /// Per-tick accumulation of light-channel mutations for one slug. A colour lane fills the
+    /// other lanes from the in-tick colour, then the live one (`liveColor`).
     private struct LightAccumulator {
         var color: SIMD3<Float>?
         var intensity: Float?
         var range: Float?
         var innerCone: Float?
         var outerCone: Float?
-        var euler: SIMD3<Float>?
-        var rotationDirty = false
-        var position: SIMD3<Float>?
     }
 
-    /// LOCAL pose of one carrier-anchored light / camera: its position and its record's angles
-    /// (radians by axis), patched per axis (multi-turn faithful, no quaternion re-decompose).
-    /// The angles turn into the carrier's quaternion in `order` — the record's own — through the
-    /// core (`carrierRotation`), never here.
-    struct CarrierPose: Equatable {
-        var position: SIMD3<Float>
-        var euler: SIMD3<Float>
-        /// `TrideCameraDescriptor.rotationOrder` for a camera; a light's angles are X Y Z.
-        var order: String = PointerDispatcher.lightRotationOrder
-    }
-
-    /// The order a light record's angles compose in (`TrideLightDescriptor.rotation`: Euler XYZ).
-    static let lightRotationOrder = eulerXYZOrder
-
-    /// The editor's Euler XYZ (`Q = Qx · Qy · Qz`): a node's per-axis rotation lanes and a light
-    /// record's angles.
+    /// The editor's Euler XYZ (`Q = Qx · Qy · Qz`): a 3-component rotation value's angles.
     static let eulerXYZOrder = "xyz"
 
     /// Per-tick lens overlay of one camera (`/cameras/{id}/yfov|znear|zfar|focusDistance|aperture`).
@@ -381,33 +334,23 @@ final class PointerDispatcher {
     func bind(to bridge: FilamentBridge, record: RecordScene) {
         self.record = record
         kindByPointer = [:]
-        heldMorphWeights = [:]
+        heldMorphWeights.reset()
+        morphTargetCounts = [:]
+        morphWriteWarned = []
         lastBonePalettes = [:]
-        // The record's table: a node's place is its row, a carrier's comes after the rows.
+        // The record's table: a node's place is its row; a light / camera sits on its node's row.
         nodeIdToGltfIndex = record.placeOf
-        carrierIndexById = record.carrierPlace
         nodeReadPointer = record.uidAt.mapValues { "/node/\($0)" }
 
-        // Enumerate manifest-owned lights and materialize them on their carrier places. Cache
-        // descriptors for partial-channel bases.
-        materializeLights(into: bridge)
-
-        // Manifest cameras sit on their carrier places; the authored `scene.activeCamera` seeds the
-        // View (runtime switches arrive as `/scene/active_camera` mutations).
-        materializeCameras(into: bridge)
+        // The record's lights and cameras on their nodes' places, the parameters the core resolved;
+        // the authored `scene.activeCamera` seeds the View (runtime switches arrive as
+        // `/scene/active_camera` mutations).
+        materializeLights(record, into: bridge)
+        materializeCameras(record, into: bridge)
         bridge.setActiveCamera(scene.activeCamera())
-
-        // Every carrier starts from its authored pose (a carrier with no descriptor: the origin).
-        authoredCarrierPoses = [:]
-        for id in carrierIndexById.keys {
-            let position = descriptorVec3(lightDescriptors[id]?.position ?? cameraDescriptors[id]?.position)
-            let euler = descriptorVec3(lightDescriptors[id]?.rotation ?? cameraDescriptors[id]?.rotation)
-            authoredCarrierPoses[id] = CarrierPose(
-                position: position ?? .zero,
-                euler: euler ?? .zero,
-                order: cameraDescriptors[id]?.rotationOrder ?? Self.lightRotationOrder)
+        for id in record.unplaced {
+            problem(.pointer, id, "no node of the scene holds it — it is not drawn")
         }
-        carrierPoses = authoredCarrierPoses
 
         // Node materials load before any mesh wears them; generated meshes and batches pick them up
         // as they come.
@@ -457,20 +400,24 @@ final class PointerDispatcher {
             r: environmentBaseBackground.x, g: environmentBaseBackground.y, b: environmentBaseBackground.z)
 
         logger.notice(
-            "bound dispatcher: nodes=\(self.nodeIdToGltfIndex.count) lights=\(self.lightDescriptors.count) cameras=\(self.cameraDescriptors.count) carriers=\(self.carrierIndexById.count) activeCamera=\(self.scene.activeCamera() ?? "-", privacy: .public)"
+            "bound dispatcher: nodes=\(self.nodeIdToGltfIndex.count) lights=\(record.lightPlace.count) cameras=\(record.cameraPlace.count) activeCamera=\(self.scene.activeCamera() ?? "-", privacy: .public)"
         )
     }
 
-    /// Enumerate `scene.listLights()`, cache descriptors keyed by slug, and hand the bridge plain ObjC
-    /// dictionaries (Euler `rotation` pre-resolved to a `-Z` emission `direction` here): each light
-    /// on its carrier place.
-    private func materializeLights(into bridge: FilamentBridge) {
-        let lights = scene.listLights()
-        lightDescriptors = Dictionary(
-            lights.map { ($0.id, $0) },
-            uniquingKeysWith: { first, _ in first }
-        )
-        let dicts = lights.map { Self.lightDictionary(from: $0, carrierGltfIndex: carrierIndexById[$0.id]) }
+    /// Hand the bridge the record's lights as plain ObjC dictionaries, each on its node's place,
+    /// and seed the live colour and cone from them.
+    private func materializeLights(_ record: RecordScene, into bridge: FilamentBridge) {
+        liveColor = [:]
+        liveCone = [:]
+        var dicts: [[String: Any]] = []
+        for light in record.lights {
+            guard let place = record.lightPlace[light.id] else { continue }
+            dicts.append(Self.lightDictionary(from: light, place: place))
+            if light.color.count >= 3 {
+                liveColor[light.id] = SIMD3(Float(light.color[0]), Float(light.color[1]), Float(light.color[2]))
+            }
+            liveCone[light.id] = (Float(light.innerConeAngle), Float(light.outerConeAngle))
+        }
         bridge.addLights(dicts)
     }
 
@@ -503,11 +450,6 @@ final class PointerDispatcher {
     /// with the same `trunkEpoch` moves only the module / instance transforms — a cloner's is
     /// always 0, so its empty trunk is uploaded once.
     private var uploadedTrunkEpoch: [String: UInt64] = [:]
-    /// Last cone / projection handed to the bridge per light / camera. A tick carries only the
-    /// channels that changed, so the partner of a changed one comes from here, not
-    /// from the authored descriptor.
-    private var liveCone: [String: (inner: Float, outer: Float)] = [:]
-    private var liveProjection: [String: (yfov: Float, znear: Float, zfar: Float)] = [:]
     /// The look dictionary handed to a datablock's batches and its `lookRevision`: rebuilt only
     /// when the look changes, so a sync moves instances without re-applying an unchanged look.
     private var moduleLook: [String: (params: TrideMaterialParams, slug: String?, dict: [String: Any])] = [:]
@@ -806,6 +748,7 @@ final class PointerDispatcher {
         guard let mesh = scene.deformedMesh(nodeUid: uid) else {
             guard bentImported.remove(uid) != nil else { return }
             bridge.removeGeneratedMesh(id)
+            morphTargetCounts[parent] = nil
             bridge.setNodeMeshReplaced(atIndex: parent, replaced: false)
             return
         }
@@ -922,11 +865,17 @@ final class PointerDispatcher {
             objectUid: objectUid,
             assetBytes: cachedAssetBytes
         )
-        guard let record, Self.isFileMesh(mesh) else { return bridge.upsertGeneratedMesh(id, geometry: dict) }
+        guard let record, Self.isFileMesh(mesh) else {
+            morphTargetCounts[parent] = nil
+            return bridge.upsertGeneratedMesh(id, geometry: dict)
+        }
         var file = Self.fileMeshDictionary(dict, mesh: mesh, assetBytes: cachedAssetBytes)
-        if !mesh.morphTargets.isEmpty {
-            // The weights it starts at: the last the stream set, else the node's at rest.
-            let weights = heldMorphWeights[parent] ?? (record.restWeights[objectUid] ?? []).map(Float.init)
+        let targets = min(mesh.morphTargets.count, 256)
+        morphTargetCounts[parent] = targets
+        if targets > 0 {
+            // The weights it starts at: the node's held vector, seeded at rest, with what the stream set.
+            let weights = heldMorphWeights.fold(
+                place: parent, count: targets, rest: record.restWeights[objectUid], lanes: [:]).vector
             file["morphWeights"] = weights.map { NSNumber(value: $0) }
         }
         // A node with a skin: its joints (at most Filament's 256) bend the mesh as a whole skin;
@@ -1528,86 +1477,53 @@ final class PointerDispatcher {
     }
 
 
-    /// Enumerate `scene.listCameras()`, cache descriptors keyed by slug, and
-    /// hand the bridge plain ObjC dictionaries. Each camera's pose lives on its carrier place; the
-    /// bridge builds the Camera component there.
-    private func materializeCameras(into bridge: FilamentBridge) {
-        let cameras = scene.listCameras()
-        cameraDescriptors = Dictionary(
-            cameras.map { ($0.id, $0) },
-            uniquingKeysWith: { first, _ in first }
-        )
-        bridge.addCameras(
-            cameras.map {
-                Self.cameraDictionary(
-                    from: $0,
-                    carrierGltfIndex: carrierIndexById[$0.id],
-                    focusTargetGltfIndex: $0.focusTarget.flatMap { nodeIdToGltfIndex[$0] }
-                )
-            }
-        )
+    /// Hand the bridge the record's cameras as plain ObjC dictionaries, each on its node's place,
+    /// and seed the live projection from them.
+    private func materializeCameras(_ record: RecordScene, into bridge: FilamentBridge) {
+        liveProjection = [:]
+        var dicts: [[String: Any]] = []
+        for camera in record.cameras {
+            guard let place = record.cameraPlace[camera.id] else { continue }
+            dicts.append(Self.cameraDictionary(from: camera, place: place))
+            liveProjection[camera.id] = (Float(camera.yfov), Float(camera.znear), Float(camera.zfar))
+        }
+        bridge.addCameras(dicts)
     }
 
-    /// Build the ObjC descriptor dictionary `FilamentBridge.addCameras(_:)`
-    /// consumes: identity, projection kind + lens params, and the carrier index.
-    static func cameraDictionary(
-        from camera: TrideCameraDescriptor,
-        carrierGltfIndex: Int? = nil,
-        focusTargetGltfIndex: Int? = nil
-    ) -> [String: Any] {
+    /// The ObjC dictionary `FilamentBridge.addCameras(_:)` consumes: the record camera's id, its
+    /// node's place, its kind and resolved lens (`focusTarget` a row, as `place`).
+    static func cameraDictionary(from camera: TrideRecordCamera, place: Int) -> [String: Any] {
         var dict: [String: Any] = [
             "id": camera.id,
+            "place": place,
             "kind": camera.kind,
+            "yfov": camera.yfov,
+            "xmag": camera.xmag,
+            "ymag": camera.ymag,
             "znear": camera.znear,
+            "zfar": camera.zfar,
+            "focusDistance": camera.focusDistance,
+            "aperture": camera.aperture,
         ]
-        if let yfov = camera.yfov { dict["yfov"] = yfov }
         if let aspect = camera.aspectRatio { dict["aspectRatio"] = aspect }
-        if let xmag = camera.xmag { dict["xmag"] = xmag }
-        if let ymag = camera.ymag { dict["ymag"] = ymag }
-        if let zfar = camera.zfar { dict["zfar"] = zfar }
-        if let idx = carrierGltfIndex { dict["carrierGltfIndex"] = idx }
-        // The focus (a node wins over the distance) and the depth-of-field f-number.
-        if let focus = camera.focusDistance { dict["focusDistance"] = focus }
-        if let aperture = camera.aperture { dict["aperture"] = aperture }
-        if let idx = focusTargetGltfIndex { dict["focusTargetGltfIndex"] = idx }
+        if let target = camera.focusTarget { dict["focusTargetPlace"] = Int(target) }
         return dict
     }
 
-    /// Build the ObjC descriptor dictionary `FilamentBridge.addLights(_:)`
-    /// consumes. Euler XYZ `rotation` is resolved to a unit `-Z` emission
-    /// direction here so the bridge stays a pure Filament applier.
-    static func lightDictionary(
-        from light: TrideLightDescriptor,
-        carrierGltfIndex: Int? = nil
-    ) -> [String: Any] {
-        var dict: [String: Any] = [
+    /// The ObjC dictionary `FilamentBridge.addLights(_:)` consumes: the record light's id, its
+    /// node's place and its resolved parameters. No pose: the light faces −Z of its node.
+    static func lightDictionary(from light: TrideRecordLight, place: Int) -> [String: Any] {
+        [
             "id": light.id,
+            "place": place,
             "type": light.lightType,
             "color": light.color,
             "intensity": light.intensity,
+            "range": light.range,
+            "innerConeAngle": light.innerConeAngle,
+            "outerConeAngle": light.outerConeAngle,
+            "castShadows": light.castShadows,
         ]
-        if let range = light.range { dict["range"] = range }
-        if let inner = light.innerConeAngle { dict["innerConeAngle"] = inner }
-        if let outer = light.outerConeAngle { dict["outerConeAngle"] = outer }
-        if let cast = light.castShadows { dict["castShadows"] = cast }
-        if let position = light.position { dict["position"] = position }
-        // The carrier place — the bridge builds the Light component on it and leaves the pose to
-        // the TransformManager.
-        if let idx = carrierGltfIndex { dict["carrierGltfIndex"] = idx }
-        let direction = Self.lightForwardDirection(eulerXYZ: light.rotation)
-        dict["direction"] = [direction.x, direction.y, direction.z]
-        return dict
-    }
-
-    /// Resolve a light's Euler XYZ radians orientation to its world-space
-    /// `-Z` emission direction (`KHR_lights_punctual`): compose the Euler
-    /// to a quaternion (`Qx·Qy·Qz`) and rotate the forward axis.
-    /// `nil` Euler = identity ⇒ forward `(0, 0, -1)`.
-    static func lightForwardDirection(eulerXYZ euler: [Double]?) -> SIMD3<Float> {
-        let forward = SIMD3<Float>(0, 0, -1)
-        guard let euler, euler.count >= 3 else { return forward }
-        let q = eulerXYZQuaternion(SIMD3(Float(euler[0]), Float(euler[1]), Float(euler[2])))
-        return q.act(forward)
     }
 
     /// Apply a tick's mutations to Filament. Nodes dirty in 2+ TRS
@@ -1642,19 +1558,6 @@ final class PointerDispatcher {
         var environmentAcc: EnvironmentAccumulator?
         var renderSettingsAcc: RenderSettingsAccumulator?
 
-        // Carriers whose held pose this batch moved, and which of their components.
-        var movedCarriers: [String: FilamentBridgeTRSMask] = [:]
-        if complete {
-            // A whole frame: a pose the core no longer writes is the authored one again.
-            for (id, authored) in authoredCarrierPoses {
-                guard let held = carrierPoses[id], held != authored else { continue }
-                var mask: FilamentBridgeTRSMask = []
-                if held.position != authored.position { mask.insert(.translation) }
-                if held.euler != authored.euler { mask.insert(.rotation) }
-                movedCarriers[id] = mask
-                carrierPoses[id] = authored
-            }
-        }
         var cameraLenses: [String: CameraLensAccumulator] = [:]
         // `.some(nil)` = a switch to the default camera was requested.
         var activeCameraSwitch: String?? = nil
@@ -1735,41 +1638,14 @@ final class PointerDispatcher {
                 }
             case .materialBaseColor(let i):  dirtyMaterials.insert(i)
             case .light(let id, let channel):
-                if let spatial = Self.spatialChannel(of: channel),
-                   let expected = Self.wholeSpatialShapeProblem(spatial, mutation.typedValue) {
-                    valueShapeProblem(mutation, expected)
-                    continue
-                }
-                // A carrier-anchored light's pose lives on its carrier node;
-                // only non-spatial channels overlay the light.
-                if carrierIndexById[id] != nil, let spatial = Self.spatialChannel(of: channel) {
-                    recordCarrierPose(id: id, channel: spatial, value: mutation.typedValue, moved: &movedCarriers)
-                } else {
-                    recordLightMutation(
-                        id: id,
-                        channel: channel,
-                        value: mutation.typedValue,
-                        into: &lightAccumulators
-                    )
-                }
+                recordLightMutation(
+                    id: id,
+                    channel: channel,
+                    value: mutation.typedValue,
+                    into: &lightAccumulators
+                )
             case .camera(let id, let channel):
                 switch channel {
-                case .position(let c), .rotation(let c):
-                    let spatial: SpatialChannel
-                    if case .position = channel {
-                        spatial = .position(component: c)
-                    } else {
-                        spatial = .rotation(component: c)
-                    }
-                    if let expected = Self.wholeSpatialShapeProblem(spatial, mutation.typedValue) {
-                        valueShapeProblem(mutation, expected)
-                        continue
-                    }
-                    guard carrierIndexById[id] != nil else {
-                        warnCarrierlessCameraOnce(id)
-                        continue
-                    }
-                    recordCarrierPose(id: id, channel: spatial, value: mutation.typedValue, moved: &movedCarriers)
                 case .yfov:
                     if let s = Self.extractScalar(from: mutation.typedValue) {
                         cameraLenses[id, default: CameraLensAccumulator()].yfov = Float(s)
@@ -1950,31 +1826,30 @@ final class PointerDispatcher {
         }
 
         // Morph target weights.
-        for (nodeIndex, weights) in morphWeights {
-            // Filament caps a renderable at 256 morph targets: a larger index is never a real lane
-            // and must not size the held vector.
-            let lanes = weights.filter { $0.key >= 0 && $0.key < 256 }
-            let maxIdx = lanes.keys.max() ?? -1
-            if maxIdx < 0 { continue }
-            // Held, not rebuilt from the batch: lanes this tick did not write keep their value.
-            // The bridge clamps to the renderable's target count.
-            var arr = heldMorphWeights[nodeIndex] ?? []
-            if arr.count < maxIdx + 1 {
-                arr.append(contentsOf: [Float](repeating: 0, count: maxIdx + 1 - arr.count))
+        for (nodeIndex, lanes) in morphWeights {
+            guard let count = morphTargetCounts[nodeIndex], count > 0 else {
+                if morphWriteWarned.insert("\(nodeIndex)").inserted {
+                    problem(.pointer, "\(nodeIndex)", "node \(nodeIndex) has no morph targets — its weights are ignored")
+                }
+                continue
             }
-            for (wi, val) in lanes {
-                arr[wi] = val
+            // Held, not rebuilt from the batch: lanes this tick did not write keep their value, a
+            // node's first write starts at its row's weights at rest.
+            let rest = record?.uidAt[nodeIndex].flatMap { record?.restWeights[$0] }
+            let fold = heldMorphWeights.fold(place: nodeIndex, count: count, rest: rest, lanes: lanes)
+            for lane in fold.rejected where morphWriteWarned.insert("\(nodeIndex)/\(lane)").inserted {
+                problem(.pointer, "\(nodeIndex)/\(lane)", "node \(nodeIndex) has no morph target \(lane)")
             }
-            heldMorphWeights[nodeIndex] = arr
-            bridge.setMorphWeights(atIndex: nodeIndex, weights: &arr, count: arr.count)
+            var vector = fold.vector
+            bridge.setMorphWeights(atIndex: nodeIndex, weights: &vector, count: vector.count)
         }
 
-        // Apply accumulated light overlays. Routed by slug through
-        // the bridge's single `slug → entity` lookup; rotation is resolved
-        // Euler→quat→`-Z` here before reaching Filament.
+        // Apply accumulated light overlays. Routed by slug through the bridge's single
+        // `slug → entity` lookup; the pose is the node's.
         for (id, acc) in lightAccumulators {
             if let c = acc.color {
                 bridge.setLightColor(id, r: c.x, g: c.y, b: c.z)
+                liveColor[id] = c
             }
             if let i = acc.intensity {
                 bridge.setLightIntensity(id, intensity: i)
@@ -1983,56 +1858,20 @@ final class PointerDispatcher {
                 bridge.setLightRange(id, range: r)
             }
             if acc.innerCone != nil || acc.outerCone != nil {
-                let descriptor = lightDescriptors[id]
-                let inner = acc.innerCone ?? liveCone[id]?.inner
-                    ?? descriptor?.innerConeAngle.map(Float.init) ?? 0
-                let outer = acc.outerCone ?? liveCone[id]?.outer
-                    ?? descriptor?.outerConeAngle.map(Float.init) ?? Float.pi / 4
+                // A light the record has no cone for (not drawn) gets none.
+                guard let live = liveCone[id] else { continue }
+                let inner = acc.innerCone ?? live.inner
+                let outer = acc.outerCone ?? live.outer
                 bridge.setLightCone(id, inner: inner, outer: outer)
                 liveCone[id] = (inner, outer)
             }
-            if acc.rotationDirty, let e = acc.euler {
-                let dir = Self.lightForwardDirection(
-                    eulerXYZ: [Double(e.x), Double(e.y), Double(e.z)]
-                )
-                bridge.setLightDirection(id, direction: dir)
-            }
-            if let p = acc.position {
-                bridge.setLightPosition(id, position: p)
-            }
         }
 
-        // Carrier-anchored light / camera poses land on the carrier node through
-        // the SAME index-based TRS path mesh nodes use; the Light / Camera
-        // components sit at identity under it, so the group transform composes
-        // in Filament. The held pose goes whole for each component a lane moved; its rotation is
-        // the core's composition of the held angles in the record's order.
-        for (id, moved) in movedCarriers {
-            guard !moved.isEmpty, let idx = carrierIndexById[id], let pose = carrierPoses[id] else { continue }
-            var mask = moved
-            var rotation = simd_float4(0, 0, 0, 1)
-            if mask.contains(.rotation) {
-                if let r = Self.carrierRotation(pose) {
-                    rotation = r
-                } else {
-                    mask.remove(.rotation)
-                    warnUnknownRotationOrderOnce(id, pose.order)
-                    if mask.isEmpty { continue }
-                }
-            }
-            bridge.setNodeTRS(atIndex: idx,
-                              translation: pose.position,
-                              rotation: rotation,
-                              scale: SIMD3<Float>(1, 1, 1),
-                              mask: mask)
-        }
         for (id, lens) in cameraLenses {
-            let d = cameraDescriptors[id]
-            if lens.yfov != nil || lens.znear != nil || lens.zfar != nil {
-                let live = liveProjection[id]
-                let yfov = lens.yfov ?? live?.yfov ?? d?.yfov.map(Float.init) ?? 0
-                let znear = lens.znear ?? live?.znear ?? Float(d?.znear ?? 0.1)
-                let zfar = lens.zfar ?? live?.zfar ?? d?.zfar.map(Float.init) ?? 0
+            if lens.yfov != nil || lens.znear != nil || lens.zfar != nil, let live = liveProjection[id] {
+                let yfov = lens.yfov ?? live.yfov
+                let znear = lens.znear ?? live.znear
+                let zfar = lens.zfar ?? live.zfar
                 bridge.setCameraProjection(id, yfov: yfov, znear: znear, zfar: zfar)
                 liveProjection[id] = (yfov, znear, zfar)
             }
@@ -2188,7 +2027,7 @@ final class PointerDispatcher {
     /// camera id (`TrideKitScene.nodeWorlds`).
     func worlds(on bridge: FilamentBridge) -> [String: [Float]] {
         var out: [String: [Float]] = [:]
-        for (id, place) in nodeIdToGltfIndex.merging(carrierIndexById, uniquingKeysWith: { node, _ in node }) {
+        for (id, place) in record?.placeById ?? nodeIdToGltfIndex {
             if let world = bridge.worldTransform(atIndex: place) { out[id] = world.map(\.floatValue) }
         }
         return out
@@ -2196,10 +2035,9 @@ final class PointerDispatcher {
 
     // MARK: - Light mutation accumulation
 
-    /// Fold one light-channel mutation into the per-slug accumulator.
-    /// Whole-vector channels take the typed value verbatim; per-axis
-    /// channels seed the other axes from the in-tick accumulator, then the
-    /// cached descriptor, so the bridge always receives a complete vector.
+    /// Fold one light-channel mutation into the per-slug accumulator. The whole colour takes the
+    /// typed value verbatim; a lane fills the others from the in-tick colour, then the live one —
+    /// what the view draws now, never the authored value.
     private func recordLightMutation(
         id: String,
         channel: LightChannel,
@@ -2207,14 +2045,13 @@ final class PointerDispatcher {
         into accumulators: inout [String: LightAccumulator]
     ) {
         var acc = accumulators[id] ?? LightAccumulator()
-        let descriptor = lightDescriptors[id]
 
         switch channel {
         case .color(.none):
             if let v = Self.extractVec3(from: value) { acc.color = v }
         case .color(.some(let c)):
-            if let s = Self.extractScalar(from: value) {
-                var base = acc.color ?? descriptorVec3(descriptor?.color) ?? SIMD3(1, 1, 1)
+            if let s = Self.extractScalar(from: value), let live = acc.color ?? liveColor[id] {
+                var base = live
                 base[c] = Float(s)
                 acc.color = base
             }
@@ -2226,121 +2063,9 @@ final class PointerDispatcher {
             if let s = Self.extractScalar(from: value) { acc.innerCone = Float(s) }
         case .outerCone:
             if let s = Self.extractScalar(from: value) { acc.outerCone = Float(s) }
-        case .rotation(.none):
-            if let v = Self.extractVec3(from: value) {
-                acc.euler = v
-                acc.rotationDirty = true
-            }
-        case .rotation(.some(let c)):
-            if let s = Self.extractScalar(from: value) {
-                var base = acc.euler ?? descriptorVec3(descriptor?.rotation) ?? .zero
-                base[c] = Float(s)
-                acc.euler = base
-                acc.rotationDirty = true
-            }
-        case .position(.none):
-            if let v = Self.extractVec3(from: value) { acc.position = v }
-        case .position(.some(let c)):
-            if let s = Self.extractScalar(from: value) {
-                var base = acc.position ?? descriptorVec3(descriptor?.position) ?? .zero
-                base[c] = Float(s)
-                acc.position = base
-            }
         }
 
         accumulators[id] = acc
-    }
-
-    private func descriptorVec3(_ values: [Double]?) -> SIMD3<Float>? {
-        guard let values, values.count >= 3 else { return nil }
-        return SIMD3(Float(values[0]), Float(values[1]), Float(values[2]))
-    }
-
-    /// The spatial lane of a light channel (position / rotation), or `nil` for
-    /// the non-spatial ones that always overlay the LightManager component.
-    static func spatialChannel(of channel: LightChannel) -> SpatialChannel? {
-        switch channel {
-        case .position(let c): return .position(component: c)
-        case .rotation(let c): return .rotation(component: c)
-        default: return nil
-        }
-    }
-
-    /// What a whole light / camera position or rotation expects when `value` is not it, else `nil`:
-    /// the record's 3-vector (a rotation = its Euler angles, radians, the record's order — the core
-    /// turns a quaternion into them). A quaternion is refused, never read as angles; a lane is not
-    /// judged here.
-    static func wholeSpatialShapeProblem(_ channel: SpatialChannel, _ value: TrideTypedValue) -> String? {
-        switch channel {
-        case .position(.none):
-            return extractVec3(from: value) == nil ? "a whole position expects [x, y, z]" : nil
-        case .rotation(.none):
-            return extractVec3(from: value) == nil
-                ? "a whole rotation expects the stored Euler angles [x, y, z] (radians); a quaternion is converted by the core"
-                : nil
-        case .position(.some), .rotation(.some):
-            return nil
-        }
-    }
-
-    /// Fold one spatial mutation of a carrier-anchored entity into its held LOCAL
-    /// pose: a whole vector replaces the component, a per-axis lane patches that axis and the
-    /// others keep what the earlier batches left — never the authored value (changed-only
-    /// batches leave out an axis the core stopped writing). Euler-space patching, no quaternion
-    /// re-decompose (multi-turn faithful).
-    private func recordCarrierPose(
-        id: String,
-        channel: SpatialChannel,
-        value: TrideTypedValue,
-        moved: inout [String: FilamentBridgeTRSMask]
-    ) {
-        var pose = carrierPoses[id] ?? CarrierPose(position: .zero, euler: .zero)
-        switch channel {
-        case .position(.none):
-            guard let v = Self.extractVec3(from: value) else { return }
-            pose.position = v
-            moved[id, default: []].insert(.translation)
-        case .position(.some(let c)):
-            guard let s = Self.extractScalar(from: value) else { return }
-            pose.position[c] = Float(s)
-            moved[id, default: []].insert(.translation)
-        case .rotation(.none):
-            guard let v = Self.extractVec3(from: value) else { return }
-            pose.euler = v
-            moved[id, default: []].insert(.rotation)
-        case .rotation(.some(let c)):
-            guard let s = Self.extractScalar(from: value) else { return }
-            pose.euler[c] = Float(s)
-            moved[id, default: []].insert(.rotation)
-        }
-        carrierPoses[id] = pose
-    }
-
-    /// Warn-once notice: a pose mutation of a camera the scene record lays no carrier place for
-    /// cannot be posed.
-    private func warnCarrierlessCameraOnce(_ id: String) {
-        guard !warnedCarrierlessCameras.contains(id) else { return }
-        warnedCarrierlessCameras.insert(id)
-        problem(.pointer, id, "camera has no carrier place in the scene record — its movement is dropped")
-    }
-
-    /// The quaternion `[x, y, z, w]` of a carrier's held angles in its record's order — the
-    /// core's one composition (`eulerToQuat`, the same the core's own camera pose and `pick`
-    /// use), so any order the core knows places the carrier alike on every host. `nil` = an
-    /// order this core does not know (a host built against another core).
-    static func carrierRotation(_ pose: CarrierPose) -> simd_float4? {
-        let e = pose.euler
-        let q = eulerToQuat(euler: [Double(e.x), Double(e.y), Double(e.z)], order: pose.order)
-        guard q.count == 4 else { return nil }
-        return simd_float4(Float(q[0]), Float(q[1]), Float(q[2]), Float(q[3]))
-    }
-
-    /// Warn-once notice: the core refused a carrier's rotation order — the carrier keeps its
-    /// last rotation (no guessed composition).
-    private func warnUnknownRotationOrderOnce(_ id: String, _ order: String) {
-        guard !warnedUnknownRotationOrders.contains(id) else { return }
-        warnedUnknownRotationOrders.insert(id)
-        problem(.pointer, id, "rotation order '\(order)' is unknown to the core — the rotation is not applied")
     }
 
     // MARK: - Environment mutation accumulation
@@ -2568,24 +2293,10 @@ final class PointerDispatcher {
         }
     }
 
-    /// Map a `/cameras/{slug}/…` property segment to a `CameraChannel`.
-    /// Whole-vector (`position` / `rotation`), dotted per-axis (`rotation.y`),
-    /// the editor grammar's `translation` alias, and the scalar
-    /// lens lanes (`yfov` / `znear` / `zfar` / `focusDistance` / `aperture`).
+    /// Map a `/cameras/{slug}/…` property segment to a `CameraChannel`: the scalar lens lanes
+    /// (`yfov` / `znear` / `zfar` / `focusDistance` / `aperture`). A pose is the camera's node's.
     private static func classifyCameraChannel(_ segment: String) -> CameraChannel? {
-        if let dotIdx = segment.firstIndex(of: ".") {
-            let base = String(segment[segment.startIndex..<dotIdx])
-            let comp = String(segment[segment.index(after: dotIdx)...])
-            guard let c = xyzComponentIndex(comp) else { return nil }
-            switch base {
-            case "position", "translation": return .position(component: c)
-            case "rotation":                return .rotation(component: c)
-            default:                        return nil
-            }
-        }
         switch segment {
-        case "position", "translation": return .position(component: nil)
-        case "rotation":                return .rotation(component: nil)
         case "yfov":                    return .yfov
         case "znear":                   return .znear
         case "zfar":                    return .zfar
@@ -2595,10 +2306,8 @@ final class PointerDispatcher {
         }
     }
 
-    /// Map a `/lights/{slug}/…` property segment to a `LightChannel`.
-    /// Handles both whole-vector (`rotation`) and dotted per-axis
-    /// (`rotation.x`, `color.g`) forms emitted by the runtime; `translation` (the catalogue's
-    /// name, as for cameras) is the manifest's `position`.
+    /// Map a `/lights/{slug}/…` property segment to a `LightChannel`: the colour whole or a lane
+    /// (`color.g`) and the scalars. A pose is the light's node's.
     private static func classifyLightChannel(_ segment: String) -> LightChannel? {
         if let dotIdx = segment.firstIndex(of: ".") {
             let base = String(segment[segment.startIndex..<dotIdx])
@@ -2607,12 +2316,6 @@ final class PointerDispatcher {
             case "color":
                 guard let c = rgbComponentIndex(comp) else { return nil }
                 return .color(component: c)
-            case "rotation":
-                guard let c = xyzComponentIndex(comp) else { return nil }
-                return .rotation(component: c)
-            case "position", "translation":
-                guard let c = xyzComponentIndex(comp) else { return nil }
-                return .position(component: c)
             default:
                 return nil
             }
@@ -2623,8 +2326,6 @@ final class PointerDispatcher {
         case "range":          return .range
         case "innerConeAngle": return .innerCone
         case "outerConeAngle": return .outerCone
-        case "rotation":       return .rotation(component: nil)
-        case "position", "translation": return .position(component: nil)
         default:               return nil
         }
     }
@@ -2748,7 +2449,7 @@ final class PointerDispatcher {
     /// The dispatch bucket of a pointer as the core sends it. A node is named by its uid only
     /// (R-OneLookupPath): `/node/{uid}` is rewritten to its place, the index form `classify` reads;
     /// an incoming `/nodes/{i}` names no node (the core names every node it knows `/node/{uid}`),
-    /// so it is `.unknown` — a problem said once — never the node or carrier at place `i`.
+    /// so it is `.unknown` — a problem said once — never the node at place `i`.
     static func incomingKind(_ pointer: String, using nodeIdToGltfIndex: [String: Int]) -> DispatchKind {
         if pointer.hasPrefix("/nodes/") { return .unknown }
         return classify(rewriteNodePointer(pointer, using: nodeIdToGltfIndex))
@@ -2842,9 +2543,7 @@ final class PointerDispatcher {
 
     /// The quaternion of Euler XYZ angles in radians (`Q = Qx · Qy · Qz`, the editor's Euler XYZ)
     /// — the core's composition (`eulerToQuat`), never one of the view's own. Used by per-axis node
-    /// rotation channels, the directions of carrier-less lights and 3-component rotation values;
-    /// canonical 4-component quaternions bypass it, a carrier composes in its record's order
-    /// (`carrierRotation`).
+    /// rotation channels and 3-component rotation values; canonical 4-component quaternions bypass it.
     static func eulerXYZQuaternion(_ e: SIMD3<Float>) -> simd_quatf {
         let q = eulerToQuat(euler: [Double(e.x), Double(e.y), Double(e.z)], order: eulerXYZOrder)
         // INVARIANT: "xyz" and three angles are always the core's; an empty answer is a core this
