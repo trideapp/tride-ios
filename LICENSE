@@ -1,4 +1,4 @@
-TRIDE PLAYERS LICENCE 1.1
+TRIDE PLAYERS LICENCE 1.2
 
 Copyright (c) 2026 Tride Labs Ltd. All rights reserved except as granted below.
 
@@ -24,6 +24,22 @@ Definitions
    the Players, changed or not, as part of Your Products to their users, who may use them as part of
    Your Products. You may do this for any purpose, including commercial ones, without paying the
    Licensor.
+   For clarity, all of the following is within this grant and is not a breach of clause 3(a):
+   (a) Open-source products. Your Product may be open source: its other parts may come under any
+       licences, and this licence puts no condition on them. The Players in it stay under this
+       licence; no licence of Your Product applies to them.
+   (b) Everyone who gets a copy. Whoever receives the Players, from the Licensor or inside Your
+       Product, receives them under this licence and is "You" for products of their own, changed
+       versions of Your Product included. As far as this licence is concerned, they may also pass
+       Your Product on unchanged, with the Players in it.
+   (c) Downloading. Build scripts, package manifests and instructions of Your Product, public ones
+       included, may download the Players from where the Licensor publishes them, or tell others
+       to do so.
+   (d) Source repositories. The source repository of Your Product, a public one included, may hold
+       the Players' files, unchanged, as part of Your Product's source, if they stay together with
+       this licence and THIRD_PARTY_NOTICES, the repository says that the Players are under this
+       licence and not under the repository's own, and the repository is not offered as a place to
+       get the Players.
 2. Duration. The grant in clause 1 is non-exclusive, worldwide, royalty-free and perpetual for every
    release of the Players You have received under this licence, except as set out in clause 8. Later
    releases may come under different terms; the terms of a release You already have never change.
@@ -31,7 +47,11 @@ Definitions
    their own, or as a library, development kit or service for others to build with, other than as
    part of Your Products; (b) attempt to derive source code from the runtime binaries, except where
    the law allows it regardless of this licence; (c) remove copyright or licence notices.
-4. Your Content. You own Your Content. This licence gives the Licensor no rights in it.
+4. Your Content. You own Your Content. This licence gives the Licensor no rights in it. You may
+   publish the scene files that are Your Content and license them to anyone on any terms You
+   choose, public repositories included; You need no licence from the Licensor for that. The
+   Licensor claims no rights in what the Tride Editor generates into those files, such as compiled
+   materials. Material of other people inside a scene, such as a font, stays under its own terms.
 5. Your changes. Changes, fixes and ideas You send to the Licensor may be used, modified and
    relicensed by the Licensor under any terms, without payment to You. Changes You keep to Yourself
    stay Yours.

@@ -30,8 +30,8 @@
 /// - A parametric node has no mesh in the GLB — the core builds its datablock's mesh
 ///   (`datablockMesh`) and the bridge draws it as a generated mesh under the node, in the core's look.
 ///   A node a deformer bends draws the same way from the core's bent mesh
-///   (`deformedMesh`, re-pulled on `/deformed/{uid}/geometry`); an imported one hides its own
-///   renderable meanwhile (`setNodeMeshReplaced`) and shows it again when nothing bends it.
+///   (`deformedMesh`, re-pulled on `/deformed/{uid}/geometry`): the core bends only a node with a
+///   datablock, so a bent uid outside `datablockNodes` draws nothing (a problem, said once).
 /// - Node materials load at bind, before any mesh — each family's package from the
 ///   archive (on a device, its precompiled Metal build when the app bundles one —
 ///   `PrecompiledMaterials`), checked against the bridge's Filament first; their uniforms come from the core
@@ -466,8 +466,6 @@ final class PointerDispatcher {
     /// The joints of each skin part a file mesh was drawn with, by mesh row and part
     /// (`BonePaletteCheck.key`) — kept from the upload, so the check reads no mesh again.
     private(set) var skinPartJoints: [UInt64: [UInt32]] = [:]
-    /// Imported nodes drawn bent now: their own renderable gives way to the bent mesh.
-    private var bentImported: Set<String> = []
 
     /// Generator id → the uid of the node that hosts it (a node material's object).
     private var generatorHostUid: [String: String] = [:]
@@ -716,7 +714,6 @@ final class PointerDispatcher {
         guard let record else { return }
         bridge.setStandardMaterials(standardForms(of: record.materials))
         parametricNodes = record.datablockNodes
-        bentImported = []
         skinPartJoints = [:]
         for node in parametricNodes {
             uploadParametricNode(node, into: bridge)
@@ -732,33 +729,15 @@ final class PointerDispatcher {
         }
     }
 
-    /// Node `uid` was bent anew, or left every deformer's reach. A parametric node
-    /// draws its bent mesh, else its recipe's; an imported one draws the bent mesh under it with its
-    /// own renderable off, and takes its renderable back when nothing bends it.
+    /// Node `uid` was bent anew, or left every deformer's reach: its datablock's node draws its
+    /// bent mesh, else its recipe's. Every mesh of the scene record is a datablock's, so a bent node
+    /// without one draws nothing.
     private func refreshDeformed(node uid: String, into bridge: FilamentBridge) {
-        if let node = parametricNodes.first(where: { $0.nodeUid == uid }) {
-            uploadParametricNode(node, into: bridge)
+        guard let node = parametricNodes.first(where: { $0.nodeUid == uid }) else {
+            problem(.load, uid, "bent node draws no datablock of the scene record — not drawn")
             return
         }
-        guard let parent = nodeIdToGltfIndex[uid] else {
-            problem(.load, uid, "bent node is no place of the scene — not drawn")
-            return
-        }
-        let id = "parametric:\(uid)"
-        guard let mesh = scene.deformedMesh(nodeUid: uid) else {
-            guard bentImported.remove(uid) != nil else { return }
-            bridge.removeGeneratedMesh(id)
-            morphTargetCounts[parent] = nil
-            bridge.setNodeMeshReplaced(atIndex: parent, replaced: false)
-            return
-        }
-        guard upload(mesh: mesh, id: id, parent: parent, objectUid: uid, into: bridge) else {
-            problem(.load, id, "the view rejected the bent mesh")
-            return
-        }
-        if bentImported.insert(uid).inserted {
-            bridge.setNodeMeshReplaced(atIndex: parent, replaced: true)
-        }
+        uploadParametricNode(node, into: bridge)
     }
 
     /// Datablock `uid` was rebuilt at its effective recipe — its nodes

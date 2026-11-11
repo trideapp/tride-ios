@@ -8865,7 +8865,8 @@ public func FfiConverterTypeTrideRecordStandard_lower(_ value: TrideRecordStanda
 /**
  * The host's render knobs over the scene's render settings; every `None` keeps the
  * scene's value. Bloom, shadows and depth of field only switch off: `Some(true)` keeps the
- * scene's.
+ * scene's. `temporal_effects: Some(false)` switches off what makes a frame depend on the frames
+ * before it — dithering, temporal anti-aliasing, dynamic resolution — for output that repeats.
  */
 public struct TrideRenderOverrides {
     public var msaa: Bool?
@@ -8876,18 +8877,20 @@ public struct TrideRenderOverrides {
     public var bloom: Bool?
     public var shadows: Bool?
     public var depthOfField: Bool?
+    public var temporalEffects: Bool?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(msaa: Bool? = nil, 
         /**
          * 2, 4 or 8; another count keeps the scene's, with one warning.
-         */msaaSamples: UInt8? = nil, bloom: Bool? = nil, shadows: Bool? = nil, depthOfField: Bool? = nil) {
+         */msaaSamples: UInt8? = nil, bloom: Bool? = nil, shadows: Bool? = nil, depthOfField: Bool? = nil, temporalEffects: Bool? = nil) {
         self.msaa = msaa
         self.msaaSamples = msaaSamples
         self.bloom = bloom
         self.shadows = shadows
         self.depthOfField = depthOfField
+        self.temporalEffects = temporalEffects
     }
 }
 
@@ -8910,6 +8913,9 @@ extension TrideRenderOverrides: Equatable, Hashable {
         if lhs.depthOfField != rhs.depthOfField {
             return false
         }
+        if lhs.temporalEffects != rhs.temporalEffects {
+            return false
+        }
         return true
     }
 
@@ -8919,6 +8925,7 @@ extension TrideRenderOverrides: Equatable, Hashable {
         hasher.combine(bloom)
         hasher.combine(shadows)
         hasher.combine(depthOfField)
+        hasher.combine(temporalEffects)
     }
 }
 
@@ -8934,7 +8941,8 @@ public struct FfiConverterTypeTrideRenderOverrides: FfiConverterRustBuffer {
                 msaaSamples: FfiConverterOptionUInt8.read(from: &buf), 
                 bloom: FfiConverterOptionBool.read(from: &buf), 
                 shadows: FfiConverterOptionBool.read(from: &buf), 
-                depthOfField: FfiConverterOptionBool.read(from: &buf)
+                depthOfField: FfiConverterOptionBool.read(from: &buf), 
+                temporalEffects: FfiConverterOptionBool.read(from: &buf)
         )
     }
 
@@ -8944,6 +8952,7 @@ public struct FfiConverterTypeTrideRenderOverrides: FfiConverterRustBuffer {
         FfiConverterOptionBool.write(value.bloom, into: &buf)
         FfiConverterOptionBool.write(value.shadows, into: &buf)
         FfiConverterOptionBool.write(value.depthOfField, into: &buf)
+        FfiConverterOptionBool.write(value.temporalEffects, into: &buf)
     }
 }
 

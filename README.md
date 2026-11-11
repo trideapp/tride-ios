@@ -1,4 +1,4 @@
-# TrideKit for iOS — Tride 0.15.0
+# TrideKit for iOS — Tride 0.16.0
 
 Plays Tride scenes (`.trd`) in an iOS app: the Tride runtime, the Filament renderer and a SwiftUI view on
 top of them. A scene is built in Tride Editor ([tride-editor](https://github.com/trideapp/tride-editor))
@@ -6,7 +6,7 @@ and exported as `.trd`; the app only writes values into it (bindings) and fires 
 decides what to show.
 
 This repository is generated from the Tride source repository: one commit per release, changes are not
-accepted here; questions and bugs: support@tride.ws. Licence — `LICENSE` (Tride Players Licence 1.1); third-party
+accepted here; questions and bugs: support@tride.ws. Licence — `LICENSE` (Tride Players Licence 1.2); third-party
 components and their licences — `THIRD_PARTY_NOTICES.md`; which build this release is — `SNAPSHOT.md`;
 what changed — `CHANGELOG.md`.
 
@@ -22,7 +22,7 @@ what changed — `CHANGELOG.md`.
 ## In your app
 
 1. File → Add Package Dependencies… → `https://github.com/trideapp/tride-ios` → Dependency Rule
-   "Up to Next Major Version" from 0.15.0.
+   "Up to Next Major Version" from 0.16.0.
 2. Add the **TrideKit** product to your app target (it also exposes the runtime's types — `TrideValue`
    and others; a separate **TrideCore** is only for a target that needs no rendering).
 3. In the target's Build Settings: Excluded Architectures → "+" for Any iOS Simulator SDK → `x86_64`
@@ -192,5 +192,7 @@ trigger of the open scene.
 - Other Linker Flags: no `-all_load`, and no `-force_load` of another static Rust library. The Tride
   runtime is a static Rust library with its own copy of the Rust standard library; forcing it into an
   app together with another such library fails on duplicate symbols. Plain linking and `-ObjC` are fine.
-- A scene opens in TrideKit of the same release or newer; an older TrideKit does not open a scene from a
-  newer editor ("newer format"). Take the editor of the same release number from `tride-editor`.
+- A scene opens in TrideKit of the same release or newer. In an older TrideKit, a scene from a newer
+  editor that uses something TrideKit does not know does not open ("newer format": update Tride); any
+  other scene from a newer editor opens with a warning that part of it may not show. Take the editor of
+  the same release number from `tride-editor`.
