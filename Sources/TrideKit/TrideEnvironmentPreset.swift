@@ -5,9 +5,9 @@
 /// - `TrideEnvironmentPresetLoader.iblData` / `.skyboxData` — KTX1 blobs, `nil` when the resource is absent.
 ///
 /// ## Non-obvious constraints
-/// - Consumer: `TrideKitScene.applyEnvironment(to:)` → `FilamentBridge`
-///   `setIndirectLight(_:skybox:intensity:rotation:)`, which builds the
-///   `IndirectLight` / `Skybox` via the KTX1 helpers in `FilamentBridge.mm`.
+/// - Consumer: `TrideKitScene.applyEnvironment(to:)` → `FilamentBridge.applyEnvironment`, which
+///   builds the `IndirectLight` (`_ibl`) and the sky's cubemap (`_skybox`) via the KTX1 helpers in
+///   `FilamentBridge.mm`.
 /// - Diffuse irradiance SH is embedded in `<name>_ibl.ktx` metadata, so no companion `_sh.txt` is bundled.
 /// - `Resources/ibl/` is a copy of the baked presets with no sync step, so it can lag a re-bake.
 

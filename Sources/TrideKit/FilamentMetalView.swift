@@ -21,6 +21,9 @@
 /// - One view loads one scene: another scene needs a new view identity (`.id(…)`).
 /// - `.onDemand` suits scenes without temporal effects (no TAA): a paused or off-screen scene then
 ///   costs no GPU at all. A frame Filament skips keeps `needsRender` up — the next display frame retries.
+/// - The view is opaque unless the scene's environment frame is transparent: then the
+///   layer lets what lies under the view show where nothing is drawn (the bridge's swap chain is
+///   `CONFIG_TRANSPARENT`, the frame premultiplied), set once the scene is attached in `onLoaded`.
 /// - A scene the core hands no record of is not built: `onLoadError` gets `TrideKitSceneNotBuiltError`
 ///   with the core's words. Without `scene` the view only makes its bridge (a host that drives it).
 
@@ -183,16 +186,20 @@ private let logger = Logger(subsystem: "studio.tride.kit", category: "FilamentMe
         context.coordinator.bridge = bridge
         onBridgeCreated?(bridge)
 
-        loadSceneIfNeeded(context.coordinator)
+        loadSceneIfNeeded(context.coordinator, view: view)
         return view
     }
 
-    private func loadSceneIfNeeded(_ coordinator: Coordinator) {
+    private func loadSceneIfNeeded(_ coordinator: Coordinator, view: MTKView) {
         guard let bridge = coordinator.bridge, let scene, !coordinator.sceneLoadAttempted else { return }
         coordinator.sceneLoadAttempted = true
         do {
             try scene.load(into: bridge)
             onLoaded?(bridge)
+            // The host attached the scene in `onLoaded`: its environment says whether the frame has alpha.
+            let transparent = bridge.environmentTransparent
+            view.isOpaque = !transparent
+            view.backgroundColor = transparent ? .clear : nil
         } catch {
             logger.error("scene load failed: \(error.localizedDescription, privacy: .public)")
             onLoadError?(error)
@@ -211,7 +218,7 @@ private let logger = Logger(subsystem: "studio.tride.kit", category: "FilamentMe
             if view.scene !== scene { view.scene = scene }
             if view.handlesTouches != handlesTouches { view.handlesTouches = handlesTouches }
         }
-        loadSceneIfNeeded(context.coordinator)
+        loadSceneIfNeeded(context.coordinator, view: uiView)
     }
 
     /// The draw rate on the view and the wake rate on the scene's tick loop; a refused value

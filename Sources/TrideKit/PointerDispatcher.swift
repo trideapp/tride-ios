@@ -17,6 +17,9 @@
 ///   a hidden node darkens its light. `/lights/{id}` and `/cameras/{id}` lanes carry parameters
 ///   only; a pose lane there has no path (a problem, said once).
 ///   `activeCamera` seeds the View, `/scene/active_camera` switches it (hard cut).
+/// - The environment is the core's frame: a write under `/environments/{id}/…` reads
+///   `TrideScene.environmentFrame()` once per batch and hands its numbers to the bridge
+///   (`FilamentBridge.updateEnvironment`); no environment formula lives here.
 /// - A batch carries only changed channels, so a value stays until written again. The core sends
 ///   paired values as a pair (both cones, the colour whole, near with far); a lone one takes its
 ///   partner from what the view draws now (seeded from the record, advanced by every write), never
@@ -126,11 +129,10 @@ final class PointerDispatcher {
         case camera(id: String, channel: CameraChannel)
         /// `/scene/active_camera` — hard-cut camera switch.
         case activeCamera
-        /// `/environment_settings/<channel>` — manifest-scoped HDR env
-        /// authoring (flat 2-segment namespace, NOT under `/scene/`). A single
-        /// `.environment` arm routes all animatable env properties,
-        /// mirroring the `.light` slug path.
-        case environment(channel: EnvironmentChannel)
+        /// `/environments/{id}/<leaf>` — a write into environment `id` of the scene's list
+        /// (`intensity`, `opacity`, `rotation` whole or one axis, `source/color` whole or one
+        /// channel): the core's environment frame is read again after the batch.
+        case environment(id: String)
         /// `/render_settings/<leaf>` — the 3D frame's saturation, the fog colour, the bloom
         /// strength or pixelation's switch and size, flat like the environment (one object, no id).
         case renderSettings(channel: RenderSettingsChannel)
@@ -171,18 +173,6 @@ final class PointerDispatcher {
         /// The focus plane (m) and the f-number of the depth of field.
         case focusDistance
         case aperture
-    }
-
-    /// Animatable channel of an `/environment_settings/…` pointer.
-    /// `rotation` is whole-vec3 or per-axis dotted (`rotation.y`); `intensity`
-    /// is scalar; `backgroundColor` is the whole linear RGB or one
-    /// channel (`background_color.g`, `background_color/1`). `background_visible`
-    /// is intentionally absent — not animatable, so it falls through to
-    /// `.unknown`.
-    enum EnvironmentChannel: Equatable {
-        case rotation(component: Int?)
-        case intensity
-        case backgroundColor(component: Int?)
     }
 
     /// Animatable render setting: `tone_mapping/saturation` (scalar), `fog/color` (whole linear
@@ -233,12 +223,6 @@ final class PointerDispatcher {
     private var liveCone: [String: (inner: Float, outer: Float)] = [:]
     private var liveProjection: [String: (yfov: Float, znear: Float, zfar: Float)] = [:]
 
-    /// Authored HDR env base orientation (Euler XYZ radians), cached at
-    /// `bind(to:)` from `scene.environment()`. Seeds the missing axes when the
-    /// runtime emits a partial per-axis env channel (`rotation.y`) so the
-    /// bridge applies the full vector. `.zero` when no env / no settings.
-    private var environmentBaseEuler: SIMD3<Float> = .zero
-
     /// Node place → its visibility to the renderer (the core's `drawVisible`: its own flag and every
     /// ancestor's), cached at `bind(to:record:)` and advanced by the core's writes; a node's own
     /// `visible` draws nothing by itself.
@@ -248,11 +232,6 @@ final class PointerDispatcher {
     /// warn-once latch: a glTF material index pointer, which addresses nothing in a scene built from
     /// the record.
     private var materialIndexWarned = false
-
-    /// Authored background colour (linear RGB), cached at `bind(to:)` from
-    /// `scene.backgroundColor()` — seeds the other channels when the runtime emits one
-    /// (`background_color.g`) so the bridge always receives a full colour.
-    private var environmentBaseBackground = SIMD3<Float>(0.07, 0.07, 0.07)
 
     /// The fog colour now (linear RGB), cached at `bind(to:)` from the scene's
     /// normalized render settings and advanced by every fog colour write — seeds the other
@@ -288,16 +267,6 @@ final class PointerDispatcher {
         var zfar: Float?
         var focusDistance: Float?
         var aperture: Float?
-    }
-
-    /// Per-tick accumulation of the (single) HDR environment's animatable
-    /// channels. Partial per-axis `rotation.y` seeds the missing axes from
-    /// `environmentBaseEuler` so the bridge always receives a full Euler vector.
-    private struct EnvironmentAccumulator {
-        var euler: SIMD3<Float>?
-        var rotationDirty = false
-        var intensity: Float?
-        var backgroundColor: SIMD3<Float>?
     }
 
     /// Per-tick accumulation of the animatable render settings: the last
@@ -368,15 +337,6 @@ final class PointerDispatcher {
         nodeVisibleOwn = record.drawnVisible
         applyNodeVisibility(to: bridge)
 
-        // Cache the authored env orientation so per-axis env
-        // rotation channels (`rotation.y`) resolve to a full Euler vector.
-        if let env = scene.environment(), env.rotation.count >= 3 {
-            environmentBaseEuler = SIMD3(
-                Float(env.rotation[0]), Float(env.rotation[1]), Float(env.rotation[2])
-            )
-        } else {
-            environmentBaseEuler = .zero
-        }
         // The authored fog colour seeds per-channel fog writes; the authored values are where a
         // complete batch returns the animated settings.
         authoredRender = scene.renderSettings().map {
@@ -389,16 +349,6 @@ final class PointerDispatcher {
             )
         }
         if let authoredRender { renderBaseFogColor = authoredRender.fogColor }
-        // The background is the scene's, environment or not — seed the solid
-        // skybox from the manifest (the schema's grey when unauthored) and keep the base
-        // for per-channel writes.
-        let bg = scene.backgroundColor()
-        if bg.count >= 3 {
-            environmentBaseBackground = SIMD3(Float(bg[0]), Float(bg[1]), Float(bg[2]))
-        }
-        bridge.setBackgroundColor(
-            r: environmentBaseBackground.x, g: environmentBaseBackground.y, b: environmentBaseBackground.z)
-
         logger.notice(
             "bound dispatcher: nodes=\(self.nodeIdToGltfIndex.count) lights=\(record.lightPlace.count) cameras=\(record.cameraPlace.count) activeCamera=\(self.scene.activeCamera() ?? "-", privacy: .public)"
         )
@@ -629,7 +579,8 @@ final class PointerDispatcher {
                 let params = graph.params.map { ["name": $0.name, "kind": $0.kind] }
                 guard bridge.registerMaterialGraph(
                     slug, family: family, package: package, arrays: arrays, params: params,
-                    instanceColors: graph.instanceColors, castShadows: graph.castShadows)
+                    instanceColors: graph.instanceColors, castShadows: graph.castShadows,
+                    receiveShadows: graph.receiveShadows, screenRefraction: graph.screenRefraction)
                 else {
                     refused(slug)
                     continue
@@ -1533,8 +1484,8 @@ final class PointerDispatcher {
         // Manifest-owned light channel mutations, keyed by slug.
         var lightAccumulators: [String: LightAccumulator] = [:]
 
-        // Animatable HDR env channels (single environment per scene).
-        var environmentAcc: EnvironmentAccumulator?
+        // A write into the scene's environments: the core's frame is read once after the batch.
+        var environmentWritten = false
         var renderSettingsAcc: RenderSettingsAccumulator?
 
         var cameraLenses: [String: CameraLensAccumulator] = [:]
@@ -1648,12 +1599,8 @@ final class PointerDispatcher {
                 }
             case .activeCamera:
                 activeCameraSwitch = .some(Self.extractString(from: mutation.typedValue))
-            case .environment(let channel):
-                recordEnvironmentMutation(
-                    channel: channel,
-                    value: mutation.typedValue,
-                    into: &environmentAcc
-                )
+            case .environment:
+                environmentWritten = true
             case .renderSettings(let channel):
                 var a = renderSettingsAcc ?? RenderSettingsAccumulator()
                 switch channel {
@@ -1861,21 +1808,9 @@ final class PointerDispatcher {
             bridge.setActiveCamera(slug)
         }
 
-        // Apply accumulated HDR env overlay. Rotation is resolved Euler→matrix
-        // at the bridge boundary (`eulerXYZRotationMatrix`). Both setters are
-        // no-ops if no IBL is currently bound.
-        if let acc = environmentAcc {
-            if acc.rotationDirty, let e = acc.euler {
-                bridge.setIndirectLightRotation(eulerXYZ: e)
-            }
-            if let i = acc.intensity {
-                bridge.setIndirectLightIntensity(i)
-            }
-            // The background skybox recolours whether or not an IBL is bound.
-            if let c = acc.backgroundColor {
-                environmentBaseBackground = c
-                bridge.setBackgroundColor(r: c.x, g: c.y, b: c.z)
-            }
+        // The environment frame's numbers, whatever leaf moved (the core's formulas).
+        if environmentWritten, let frame = scene.environmentFrame() {
+            bridge.updateEnvironment(FilamentBridgeEnvironmentValues(frame))
         }
 
         // A complete batch: what it does not carry is no longer animated — the scene's own value.
@@ -2047,50 +1982,11 @@ final class PointerDispatcher {
         accumulators[id] = acc
     }
 
-    // MARK: - Environment mutation accumulation
-
-    /// Fold one HDR-env channel mutation into the per-tick accumulator. The
-    /// whole-vec3 rotation channel takes the typed value verbatim; a per-axis
-    /// channel (`rotation.y`) seeds the other axes from the in-tick accumulator,
-    /// then `environmentBaseEuler`, so the bridge always receives a full Euler.
-    private func recordEnvironmentMutation(
-        channel: EnvironmentChannel,
-        value: TrideTypedValue,
-        into acc: inout EnvironmentAccumulator?
-    ) {
-        var a = acc ?? EnvironmentAccumulator()
-        switch channel {
-        case .intensity:
-            if let s = Self.extractScalar(from: value) { a.intensity = Float(s) }
-        case .rotation(.none):
-            if let v = Self.extractVec3(from: value) {
-                a.euler = v
-                a.rotationDirty = true
-            }
-        case .rotation(.some(let c)):
-            if let s = Self.extractScalar(from: value) {
-                var base = a.euler ?? environmentBaseEuler
-                base[c] = Float(s)
-                a.euler = base
-                a.rotationDirty = true
-            }
-        case .backgroundColor(.none):
-            if let v = Self.extractRgb(from: value) { a.backgroundColor = v }
-        case .backgroundColor(.some(let c)):
-            if let s = Self.extractScalar(from: value) {
-                var base = a.backgroundColor ?? environmentBaseBackground
-                base[c] = Float(s)
-                a.backgroundColor = base
-            }
-        }
-        acc = a
-    }
-
     // MARK: - Pointer parsing
 
     /// Domains whose pointers the view applies itself (as opposed to the core's own parameters).
     private static let viewDomains: Set<Substring> = [
-        "node", "nodes", "materials", "materialOverrides", "lights", "cameras", "environment_settings",
+        "node", "nodes", "materials", "materialOverrides", "lights", "cameras", "environments",
         "render_settings", "scene",
     ]
 
@@ -2107,9 +2003,6 @@ final class PointerDispatcher {
         guard let segs = parsePointer(pointer), segs.count >= 2 else {
             return .unknown
         }
-        // `/environment_settings/<channel>` is a flat 2-segment
-        // manifest namespace (not under `/scene/`), so it is matched before the
-        // 3-segment node/material/light forms below.
         // `/render_settings/tone_mapping/saturation`, `/render_settings/bloom/strength`,
         // `/render_settings/pixelation/{enabled,size}`, `/render_settings/fog/color` and a fog colour
         // lane `/render_settings/fog/color/{0..2|r|g|b}`.
@@ -2137,19 +2030,10 @@ final class PointerDispatcher {
             guard let c = rgbComponentIndex(lane) else { return .unknown }
             return .renderSettings(channel: .fogColor(component: c))
         }
-        if segs[0] == "environment_settings" {
-            // A slash lane (`rotation/y`, `background_color/1` — the catalogue's lanes) is the
-            // dotted one spelled with a slash, folded as for lights and cameras.
-            let lane: String?
-            switch segs.count {
-            case 2: lane = segs[1]
-            case 3: lane = dottedLane(segs[1], axis: segs[2])
-            default: lane = nil
-            }
-            guard let lane, let channel = classifyEnvironmentChannel(lane) else {
-                return .unknown
-            }
-            return .environment(channel: channel)
+        // `/environments/{id}/<leaf>` — the scene's environments by slug.
+        if segs[0] == "environments" {
+            guard segs.count >= 3, !segs[1].isEmpty, isEnvironmentLeaf(segs[2...]) else { return .unknown }
+            return .environment(id: segs[1])
         }
         // `/scene/active_camera` — 2-segment scene-domain
         // switch (hard cut). Other `/scene/*` pointers are not bridge-routable.
@@ -2309,32 +2193,28 @@ final class PointerDispatcher {
         }
     }
 
-    /// Map an `/environment_settings/<segment>` property to an
-    /// `EnvironmentChannel`. Handles whole-vec3 (`rotation`), per-axis dotted
-    /// (`rotation.y`), scalar (`intensity`) and the whole / one-channel background
-    /// colour (`background_color`, `background_color.g`) forms the runtime
-    /// emits. `background_visible` (and any other segment) returns `nil` →
-    /// `.unknown`, since it is not animatable.
-    private static func classifyEnvironmentChannel(_ segment: String) -> EnvironmentChannel? {
-        if let dotIdx = segment.firstIndex(of: ".") {
-            let base = String(segment[segment.startIndex..<dotIdx])
-            let comp = String(segment[segment.index(after: dotIdx)...])
-            switch base {
-            case "rotation":
-                guard let c = xyzComponentIndex(comp) else { return nil }
-                return .rotation(component: c)
-            case "background_color":
-                guard let c = rgbComponentIndex(comp) else { return nil }
-                return .backgroundColor(component: c)
-            default:
-                return nil
+    /// An animatable leaf of an environment (the core's property catalogue): `intensity`, `opacity`, `rotation` whole or
+    /// one axis (`rotation.y`, `rotation/y`, `rotation/1`), `source/color` whole or one channel
+    /// (`source/color/1`, `source/color.g`). `name`, `lights`, `visible` and the rest are not animated.
+    private static func isEnvironmentLeaf(_ leaf: ArraySlice<String>) -> Bool {
+        let parts = Array(leaf)
+        switch parts.count {
+        case 1:
+            if parts[0] == "intensity" || parts[0] == "opacity" || parts[0] == "rotation" { return true }
+            let dotted = parts[0].split(separator: ".", maxSplits: 1).map(String.init)
+            return dotted.count == 2 && dotted[0] == "rotation" && xyzComponentIndex(dotted[1]) != nil
+        case 2:
+            if parts[0] == "rotation" {
+                return dottedLane("rotation", axis: parts[1]).map { ["rotation.x", "rotation.y", "rotation.z"].contains($0) } ?? false
             }
-        }
-        switch segment {
-        case "rotation":         return .rotation(component: nil)
-        case "intensity":        return .intensity
-        case "background_color": return .backgroundColor(component: nil)
-        default:                 return nil
+            guard parts[0] == "source" else { return false }
+            if parts[1] == "color" { return true }
+            let dotted = parts[1].split(separator: ".", maxSplits: 1).map(String.init)
+            return dotted.count == 2 && dotted[0] == "color" && rgbComponentIndex(dotted[1]) != nil
+        case 3:
+            return parts[0] == "source" && parts[1] == "color" && rgbComponentIndex(parts[2]) != nil
+        default:
+            return false
         }
     }
 

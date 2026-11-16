@@ -1,4 +1,4 @@
-# TrideKit for iOS — Tride 0.16.0
+# TrideKit for iOS — Tride 0.17.0
 
 Plays Tride scenes (`.trd`) in an iOS app: the Tride runtime, the Filament renderer and a SwiftUI view on
 top of them. A scene is built in Tride Editor ([tride-editor](https://github.com/trideapp/tride-editor))
@@ -22,7 +22,7 @@ what changed — `CHANGELOG.md`.
 ## In your app
 
 1. File → Add Package Dependencies… → `https://github.com/trideapp/tride-ios` → Dependency Rule
-   "Up to Next Major Version" from 0.16.0.
+   "Up to Next Major Version" from 0.17.0.
 2. Add the **TrideKit** product to your app target (it also exposes the runtime's types — `TrideValue`
    and others; a separate **TrideCore** is only for a target that needs no rendering).
 3. In the target's Build Settings: Excluded Architectures → "+" for Any iOS Simulator SDK → `x86_64`
@@ -176,6 +176,31 @@ func scrollViewDidScroll(_ scrollView: UIScrollView) {
 bindings, `dragAxes()` says whether the scene's drags also claim vertical swipes. A bound input belongs to
 its source: `setBinding` on it throws until `unbindInput`. See [Docs/API.md](Docs/API.md).
 
+## Transparent background
+
+A scene whose environments show nothing somewhere (the editor's Environment group is empty, every
+environment is hidden, or the shown ones are see-through) has a transparent background. `TrideSceneView`
+sees it when the scene loads and makes its view non-opaque by itself (`isOpaque` false, a clear
+background, a transparent swap chain); an opaque scene keeps an opaque view, as before. The app only
+puts what should show behind the scene under `TrideSceneView`, in a `ZStack`, and gives the view no
+`.background` of its own:
+
+```swift
+ZStack {
+    LinearGradient(colors: [.white, .blue], startPoint: .top, endPoint: .bottom)
+    TrideSceneView(scene: scene)
+}
+```
+
+What a transparent background changes:
+
+- depth of field is off (one warning);
+- bloom glows only inside the objects' outlines; vignette and fog fall on the objects only;
+- glass shows the scene's environments as it would over an opaque background (the bottom shown
+  environment at full opacity), not the views under it;
+- a scene whose shown opacity is keyed or driven by an input is transparent all the time, even while
+  that opacity is 100 %.
+
 ## Example
 
 `Examples/TridePlayer/TridePlayer.xcodeproj` → Run. It takes the package from this clone and the binaries
@@ -192,6 +217,9 @@ trigger of the open scene.
 - Other Linker Flags: no `-all_load`, and no `-force_load` of another static Rust library. The Tride
   runtime is a static Rust library with its own copy of the Rust standard library; forcing it into an
   app together with another such library fails on duplicate symbols. Plain linking and `-ObjC` are fine.
+- A scene saved by Tride 0.17 or later does not open in TrideKit 0.16.x (`TrideError.NewerFormat`:
+  update Tride): the scene's environments are stored as a list since 0.17. Scenes of 0.16 and earlier
+  open in 0.17 with the look they had.
 - A scene opens in TrideKit of the same release or newer. In an older TrideKit, a scene from a newer
   editor that uses something TrideKit does not know does not open ("newer format": update Tride); any
   other scene from a newer editor opens with a warning that part of it may not show. Take the editor of

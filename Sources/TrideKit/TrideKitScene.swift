@@ -874,62 +874,44 @@ public final class TrideKitScene {
 
     // MARK: - Private
 
-    /// Materialize the authored HDR environment onto the
-    /// freshly-attached bridge. Reads the schema-resolved descriptor through the
-    /// Rust core (`TrideScene.environment()` — never parses `manifest.json`
-    /// Swift-side), resolves the IBL/skybox KTX1
-    /// bytes, and forwards them to `FilamentBridge.setIndirectLight`.
-    ///
-    /// Lives here rather than in `PointerDispatcher` (where lights materialize)
-    /// because the custom-env KTX bytes come from *this* object's `.trd`
-    /// resources (`assets/ibl/<uid>_*.ktx`), whereas presets come from the
-    /// SDK-bundled `runtime-assets`. This is a static at-load apply; live
-    /// rotation/intensity keyframes flow separately through tick mutations on
-    /// `/environment_settings/*`. A scene that authored no
-    /// environment keeps the background skybox — the manifest's colour, which
-    /// `PointerDispatcher.bind(to:)` applied.
+    /// The scene's environment on the freshly attached bridge, as the core reads it
+    /// (`TrideScene.environmentFrame()`): the numbers verbatim, and the KTX of the maps
+    /// the frame names — a preset's from TrideKit's bundled `runtime-assets`, a custom one's from
+    /// this scene's `.trd` (`assets/ibl/<uid>_ibl.ktx` lights, `<uid>_skybox.ktx` shows). Writes
+    /// under `/environments/…` reach the bridge through `PointerDispatcher` (values only).
     private func applyEnvironment(to bridge: FilamentBridge) {
-        guard let env = trideScene.environment() else { return }
-
-        let iblData: Data?
-        let skyboxData: Data?
-        switch env.kind {
-        case "preset":
-            guard let preset = TrideEnvironmentPreset(rawValue: env.name) else {
-                note(TrideKitDiagnostic(kind: .load, subject: env.name, message: "unknown environment preset — the default light stays"))
-                return
-            }
-            iblData = TrideEnvironmentPresetLoader.iblData(preset)
-            skyboxData = env.backgroundVisible ? TrideEnvironmentPresetLoader.skyboxData(preset) : nil
-        case "custom":
-            iblData = resourceData(named: "assets/ibl/\(env.name)_ibl.ktx")
-            skyboxData = env.backgroundVisible ? resourceData(named: "assets/ibl/\(env.name)_skybox.ktx") : nil
-        default:
-            note(TrideKitDiagnostic(kind: .load, subject: env.name, message: "unknown environment kind '\(env.kind)' — the default light stays"))
+        guard let frame = trideScene.environmentFrame() else {
+            note(TrideKitDiagnostic(kind: .load, subject: "environment", message: "the core gave no environment frame — nothing lights or shows"))
             return
         }
-
-        guard let ibl = iblData else {
-            note(TrideKitDiagnostic(kind: .load, subject: env.name, message: "the environment's light map is missing — the default light stays"))
-            return
+        let lightKtx = frame.lightMapSource.flatMap { environmentKtx($0, suffix: "ibl") }
+        let skyKtx = frame.skyMapSource.flatMap { environmentKtx($0, suffix: "skybox") }
+        if frame.lightMapSource != nil, lightKtx == nil {
+            note(TrideKitDiagnostic(kind: .load, subject: frame.lightMapSource?.name ?? "environment", message: "the lighting map is missing — the scene is lit by its lights only"))
         }
-
-        // Euler XYZ radians → matrix happens at the bridge boundary;
-        // the core stores Euler and never converts. The descriptor always
-        // carries a length-3 vector, but guard defensively against a malformed
-        // FFI payload rather than trapping on an index.
-        let r = env.rotation
-        let euler = r.count == 3
-            ? SIMD3<Float>(Float(r[0]), Float(r[1]), Float(r[2]))
-            : SIMD3<Float>(repeating: 0)
-        bridge.setIndirectLight(
-            ibl,
-            skybox: skyboxData,
-            intensity: Float(env.intensity),
-            rotationEulerXYZ: euler)
+        if frame.skyMapSource != nil, skyKtx == nil {
+            note(TrideKitDiagnostic(kind: .load, subject: frame.skyMapSource?.name ?? "environment", message: "the shown map is missing — black where it shows"))
+        }
+        bridge.applyEnvironment(FilamentBridgeEnvironmentValues(frame), lightKtx: lightKtx, skyKtx: skyKtx)
         logger.notice(
-            "environment applied: \(env.kind, privacy: .public) '\(env.name, privacy: .public)' (skybox=\(skyboxData != nil), intensity=\(env.intensity))"
+            "environment applied: light \(frame.light.kind, privacy: .public), sky map \(skyKtx != nil), transparent \(frame.transparent)"
         )
+    }
+
+    /// `<name>_<suffix>.ktx` of a map: a preset's from the bundle, a custom one's from the `.trd`.
+    private func environmentKtx(_ source: TrideEnvironmentSourceRef, suffix: String) -> Data? {
+        switch source.kind {
+        case "preset":
+            guard let preset = TrideEnvironmentPreset(rawValue: source.name) else {
+                note(TrideKitDiagnostic(kind: .load, subject: source.name, message: "unknown environment preset"))
+                return nil
+            }
+            return suffix == "ibl" ? TrideEnvironmentPresetLoader.iblData(preset) : TrideEnvironmentPresetLoader.skyboxData(preset)
+        case "custom":
+            return resourceData(named: "assets/ibl/\(source.name)_\(suffix).ktx")
+        default:
+            return nil
+        }
     }
 
     /// The core's pixelation grid (`pixelation_grid`) in the bridge's shape — the one grid every

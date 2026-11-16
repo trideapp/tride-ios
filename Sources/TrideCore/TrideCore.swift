@@ -633,14 +633,6 @@ public protocol TrideSceneProtocol : AnyObject {
     func assetBytes(uri: String)  -> Data?
     
     /**
-     * The scene's background behind everything when no skybox is drawn — no environment, or
-     * `background_visible: false`: linear RGB, length 3, the schema's grey when not
-     * authored. Separate from [`Self::environment`], which is `None` exactly when this matters
-     * most. Its animation arrives as `/environment_settings/background_color` mutations.
-     */
-    func backgroundColor()  -> [Double]
-    
-    /**
      * Start audio input `input` (a slug: the scene reads it as `audio.<input>.<probe>`):
      * interleaved `f32` PCM of `channels` channels at `sample_rate` Hz. Starting a begun input
      * again drops what it had.
@@ -738,13 +730,19 @@ public protocol TrideSceneProtocol : AnyObject {
     func endAudio(input: String) throws 
     
     /**
-     * Authored HDR environment from `manifest.scene.environment` +
-     * `manifest.environment_settings`. `None` when the
-     * scene declares no environment. Byte-faithful with the manifest; the iOS
-     * bridge enumerates at load to build the Filament `IndirectLight` + skybox
-     * (preset → bundled KTX, custom → `.trd` `assets/ibl/<uid>_*.ktx`).
+     * The map that lights the scene, as the native hosts read it until they draw
+     * [`Self::environment_frame`]: the frame's light when it is a map, with the
+     * Euler rotation of the environment it comes from; `None` when no map lights the scene. The
+     * hosts enumerate it at load to build the Filament `IndirectLight` + skybox (preset →
+     * bundled KTX, custom → `.trd` `assets/ibl/<uid>_*.ktx`).
      */
     func environment()  -> TrideEnvironmentDescriptor?
+    
+    /**
+     * What the scene's environments light and show now — read at load and after a
+     * mutation under the environment's pointers. `None` only when the scene's lock is poisoned.
+     */
+    func environmentFrame()  -> TrideEnvironmentFrame?
     
     /**
      * Alias for [`Self::trigger`] — editor naming; `trigger` kept for existing Swift.
@@ -1283,19 +1281,6 @@ open func assetBytes(uri: String) -> Data? {
 }
     
     /**
-     * The scene's background behind everything when no skybox is drawn — no environment, or
-     * `background_visible: false`: linear RGB, length 3, the schema's grey when not
-     * authored. Separate from [`Self::environment`], which is `None` exactly when this matters
-     * most. Its animation arrives as `/environment_settings/background_color` mutations.
-     */
-open func backgroundColor() -> [Double] {
-    return try!  FfiConverterSequenceDouble.lift(try! rustCall() {
-    uniffi_tride_ffi_fn_method_tridescene_background_color(self.uniffiClonePointer(),$0
-    )
-})
-}
-    
-    /**
      * Start audio input `input` (a slug: the scene reads it as `audio.<input>.<probe>`):
      * interleaved `f32` PCM of `channels` channels at `sample_rate` Hz. Starting a begun input
      * again drops what it had.
@@ -1462,15 +1447,26 @@ open func endAudio(input: String)throws  {try rustCallWithError(FfiConverterType
 }
     
     /**
-     * Authored HDR environment from `manifest.scene.environment` +
-     * `manifest.environment_settings`. `None` when the
-     * scene declares no environment. Byte-faithful with the manifest; the iOS
-     * bridge enumerates at load to build the Filament `IndirectLight` + skybox
-     * (preset → bundled KTX, custom → `.trd` `assets/ibl/<uid>_*.ktx`).
+     * The map that lights the scene, as the native hosts read it until they draw
+     * [`Self::environment_frame`]: the frame's light when it is a map, with the
+     * Euler rotation of the environment it comes from; `None` when no map lights the scene. The
+     * hosts enumerate it at load to build the Filament `IndirectLight` + skybox (preset →
+     * bundled KTX, custom → `.trd` `assets/ibl/<uid>_*.ktx`).
      */
 open func environment() -> TrideEnvironmentDescriptor? {
     return try!  FfiConverterOptionTypeTrideEnvironmentDescriptor.lift(try! rustCall() {
     uniffi_tride_ffi_fn_method_tridescene_environment(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * What the scene's environments light and show now — read at load and after a
+     * mutation under the environment's pointers. `None` only when the scene's lock is poisoned.
+     */
+open func environmentFrame() -> TrideEnvironmentFrame? {
+    return try!  FfiConverterOptionTypeTrideEnvironmentFrame.lift(try! rustCall() {
+    uniffi_tride_ffi_fn_method_tridescene_environment_frame(self.uniffiClonePointer(),$0
     )
 })
 }
@@ -4218,25 +4214,19 @@ public func FfiConverterTypeTrideDynamicResolutionOptions_lower(_ value: TrideDy
 
 
 /**
- * Authored HDR-environment descriptor returned by [`TrideScene::environment`].
+ * The lighting map returned by [`TrideScene::environment`] — the form the native hosts read until
+ * they draw [`TrideScene::environment_frame`].
  *
- * Projects `manifest.scene.environment` (which environment) + the optional
- * `manifest.environment_settings` (how it renders) into one flat record the
- * iOS bridge consumes at load. `kind` stringifies the
- * [`tride_schema::Environment`] discriminant (mirrors `light_type` / camera
- * `kind`); `name` carries the preset registry name (`kind == "preset"`) or
- * the custom retained-blob uid (`kind == "custom"`) — the bridge resolves the
- * former from bundled `runtime-assets`, the latter from the `.trd`'s
- * `assets/ibl/<uid>_*.ktx`. `rotation` is **Euler XYZ radians**;
- * Euler→rotation-matrix happens at the Swift boundary, never here. When
- * `environment_settings` is absent the authored baseline falls back to the
- * schema defaults (identity rotation, Filament default intensity, visible
- * skybox). `None` from `environment()` means the scene authored no
- * environment.
+ * The scene's light when a map lights it (the top environment with «lights»): `kind`
+ * `"preset" | "custom"`; `name` the preset registry name or the custom retained-blob uid — the
+ * bridge resolves the former from bundled `runtime-assets`, the latter from the `.trd`'s
+ * `assets/ibl/<uid>_*.ktx`. `rotation` is that environment's **Euler XYZ radians**;
+ * Euler→rotation-matrix happens at the host boundary. `background_visible`: that map is the
+ * shown picture. `None` when no map lights the scene (a colour, or nothing).
  */
 public struct TrideEnvironmentDescriptor {
     /**
-     * Stringified [`tride_schema::Environment`] discriminant (`"preset" | "custom"`).
+     * The map's source kind (`"preset" | "custom"`).
      */
     public var kind: String
     /**
@@ -4252,7 +4242,7 @@ public struct TrideEnvironmentDescriptor {
      */
     public var intensity: Double
     /**
-     * Whether the skybox background renders (`environment_settings.background_visible`).
+     * Whether the map is the shown picture behind the scene.
      */
     public var backgroundVisible: Bool
 
@@ -4260,7 +4250,7 @@ public struct TrideEnvironmentDescriptor {
     // declare one manually.
     public init(
         /**
-         * Stringified [`tride_schema::Environment`] discriminant (`"preset" | "custom"`).
+         * The map's source kind (`"preset" | "custom"`).
          */kind: String, 
         /**
          * Preset registry name (`kind == "preset"`) or custom retained-blob uid (`kind == "custom"`).
@@ -4272,7 +4262,7 @@ public struct TrideEnvironmentDescriptor {
          * IBL intensity in lux (Filament `IndirectLight::setIntensity`).
          */intensity: Double, 
         /**
-         * Whether the skybox background renders (`environment_settings.background_visible`).
+         * Whether the map is the shown picture behind the scene.
          */backgroundVisible: Bool) {
         self.kind = kind
         self.name = name
@@ -4351,6 +4341,277 @@ public func FfiConverterTypeTrideEnvironmentDescriptor_lift(_ buf: RustBuffer) t
 #endif
 public func FfiConverterTypeTrideEnvironmentDescriptor_lower(_ value: TrideEnvironmentDescriptor) -> RustBuffer {
     return FfiConverterTypeTrideEnvironmentDescriptor.lower(value)
+}
+
+
+/**
+ * What the scene's environments light and show now — [`TrideScene::environment_frame`].
+ */
+public struct TrideEnvironmentFrame {
+    public var light: TrideEnvironmentLight
+    public var sky: TrideSkyStack
+    /**
+     * What glass refracts: `sky` with its bottom shown layer opaque.
+     */
+    public var glass: TrideSkyStack
+    /**
+     * The frame has alpha — static for the scene.
+     */
+    public var transparent: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(light: TrideEnvironmentLight, sky: TrideSkyStack, 
+        /**
+         * What glass refracts: `sky` with its bottom shown layer opaque.
+         */glass: TrideSkyStack, 
+        /**
+         * The frame has alpha — static for the scene.
+         */transparent: Bool) {
+        self.light = light
+        self.sky = sky
+        self.glass = glass
+        self.transparent = transparent
+    }
+}
+
+
+
+extension TrideEnvironmentFrame: Equatable, Hashable {
+    public static func ==(lhs: TrideEnvironmentFrame, rhs: TrideEnvironmentFrame) -> Bool {
+        if lhs.light != rhs.light {
+            return false
+        }
+        if lhs.sky != rhs.sky {
+            return false
+        }
+        if lhs.glass != rhs.glass {
+            return false
+        }
+        if lhs.transparent != rhs.transparent {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(light)
+        hasher.combine(sky)
+        hasher.combine(glass)
+        hasher.combine(transparent)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideEnvironmentFrame: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideEnvironmentFrame {
+        return
+            try TrideEnvironmentFrame(
+                light: FfiConverterTypeTrideEnvironmentLight.read(from: &buf), 
+                sky: FfiConverterTypeTrideSkyStack.read(from: &buf), 
+                glass: FfiConverterTypeTrideSkyStack.read(from: &buf), 
+                transparent: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideEnvironmentFrame, into buf: inout [UInt8]) {
+        FfiConverterTypeTrideEnvironmentLight.write(value.light, into: &buf)
+        FfiConverterTypeTrideSkyStack.write(value.sky, into: &buf)
+        FfiConverterTypeTrideSkyStack.write(value.glass, into: &buf)
+        FfiConverterBool.write(value.transparent, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideEnvironmentFrame_lift(_ buf: RustBuffer) throws -> TrideEnvironmentFrame {
+    return try FfiConverterTypeTrideEnvironmentFrame.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideEnvironmentFrame_lower(_ value: TrideEnvironmentFrame) -> RustBuffer {
+    return FfiConverterTypeTrideEnvironmentFrame.lower(value)
+}
+
+
+/**
+ * The environment light: `kind` `"none" | "color" | "map"`; `rgb` for a colour (its `sh0`, with a
+ * 1×1 cube of it), `source` for a map; `lux` the `IndirectLight` intensity; `rotation`
+ * column-major 3×3.
+ */
+public struct TrideEnvironmentLight {
+    public var kind: String
+    public var rgb: [Double]
+    public var source: TrideEnvironmentSourceRef?
+    public var lux: Double
+    public var rotation: [Double]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: String, rgb: [Double], source: TrideEnvironmentSourceRef?, lux: Double, rotation: [Double]) {
+        self.kind = kind
+        self.rgb = rgb
+        self.source = source
+        self.lux = lux
+        self.rotation = rotation
+    }
+}
+
+
+
+extension TrideEnvironmentLight: Equatable, Hashable {
+    public static func ==(lhs: TrideEnvironmentLight, rhs: TrideEnvironmentLight) -> Bool {
+        if lhs.kind != rhs.kind {
+            return false
+        }
+        if lhs.rgb != rhs.rgb {
+            return false
+        }
+        if lhs.source != rhs.source {
+            return false
+        }
+        if lhs.lux != rhs.lux {
+            return false
+        }
+        if lhs.rotation != rhs.rotation {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(kind)
+        hasher.combine(rgb)
+        hasher.combine(source)
+        hasher.combine(lux)
+        hasher.combine(rotation)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideEnvironmentLight: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideEnvironmentLight {
+        return
+            try TrideEnvironmentLight(
+                kind: FfiConverterString.read(from: &buf), 
+                rgb: FfiConverterSequenceDouble.read(from: &buf), 
+                source: FfiConverterOptionTypeTrideEnvironmentSourceRef.read(from: &buf), 
+                lux: FfiConverterDouble.read(from: &buf), 
+                rotation: FfiConverterSequenceDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideEnvironmentLight, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterSequenceDouble.write(value.rgb, into: &buf)
+        FfiConverterOptionTypeTrideEnvironmentSourceRef.write(value.source, into: &buf)
+        FfiConverterDouble.write(value.lux, into: &buf)
+        FfiConverterSequenceDouble.write(value.rotation, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideEnvironmentLight_lift(_ buf: RustBuffer) throws -> TrideEnvironmentLight {
+    return try FfiConverterTypeTrideEnvironmentLight.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideEnvironmentLight_lower(_ value: TrideEnvironmentLight) -> RustBuffer {
+    return FfiConverterTypeTrideEnvironmentLight.lower(value)
+}
+
+
+/**
+ * What an environment shows and lights with, flat: `kind` `"color" | "preset" |
+ * "custom"`; `name` the preset name or the custom retained-blob uid (empty for a colour);
+ * `color` linear RGB for a colour (empty otherwise).
+ */
+public struct TrideEnvironmentSourceRef {
+    public var kind: String
+    public var name: String
+    public var color: [Double]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: String, name: String, color: [Double]) {
+        self.kind = kind
+        self.name = name
+        self.color = color
+    }
+}
+
+
+
+extension TrideEnvironmentSourceRef: Equatable, Hashable {
+    public static func ==(lhs: TrideEnvironmentSourceRef, rhs: TrideEnvironmentSourceRef) -> Bool {
+        if lhs.kind != rhs.kind {
+            return false
+        }
+        if lhs.name != rhs.name {
+            return false
+        }
+        if lhs.color != rhs.color {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(kind)
+        hasher.combine(name)
+        hasher.combine(color)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideEnvironmentSourceRef: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideEnvironmentSourceRef {
+        return
+            try TrideEnvironmentSourceRef(
+                kind: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                color: FfiConverterSequenceDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideEnvironmentSourceRef, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterSequenceDouble.write(value.color, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideEnvironmentSourceRef_lift(_ buf: RustBuffer) throws -> TrideEnvironmentSourceRef {
+    return try FfiConverterTypeTrideEnvironmentSourceRef.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideEnvironmentSourceRef_lower(_ value: TrideEnvironmentSourceRef) -> RustBuffer {
+    return FfiConverterTypeTrideEnvironmentSourceRef.lower(value)
 }
 
 
@@ -5429,10 +5690,22 @@ public struct TrideMaterialGraph {
      */
     public var blending: String
     /**
-     * Whether the renderables drawn with it cast shadows: `false` for `"add"` — the host turns
-     * `castShadows` off on every renderable it dresses with this package.
+     * Whether the renderables drawn with it cast shadows: `false` for `"add"` and a shadow
+     * catcher — the host turns `castShadows` off on every renderable it dresses with this package.
      */
     public var castShadows: Bool
+    /**
+     * Whether they receive shadows: `false` for `"add"` only (under VSM / PCSS Filament makes every
+     * receiver a caster) — a shadow catcher receives without casting. The host sets
+     * `receiveShadows` from it, apart from `castShadows`, on every renderable of the package.
+     */
+    public var receiveShadows: Bool
+    /**
+     * It refracts the screen (`refractionMode : screenspace`, glass): the host calls
+     * `setDepthWrite(true)` on every instance of the package, or the background eraser of a
+     * transparent frame wipes it out. An opaque frame draws the same.
+     */
+    public var screenRefraction: Bool
     /**
      * Vertex attributes it reads: `"color"`, `"uv0"`, `"uv1"`.
      */
@@ -5467,9 +5740,19 @@ public struct TrideMaterialGraph {
          * `"add"` (additive light).
          */blending: String, 
         /**
-         * Whether the renderables drawn with it cast shadows: `false` for `"add"` — the host turns
-         * `castShadows` off on every renderable it dresses with this package.
+         * Whether the renderables drawn with it cast shadows: `false` for `"add"` and a shadow
+         * catcher — the host turns `castShadows` off on every renderable it dresses with this package.
          */castShadows: Bool, 
+        /**
+         * Whether they receive shadows: `false` for `"add"` only (under VSM / PCSS Filament makes every
+         * receiver a caster) — a shadow catcher receives without casting. The host sets
+         * `receiveShadows` from it, apart from `castShadows`, on every renderable of the package.
+         */receiveShadows: Bool, 
+        /**
+         * It refracts the screen (`refractionMode : screenspace`, glass): the host calls
+         * `setDepthWrite(true)` on every instance of the package, or the background eraser of a
+         * transparent frame wipes it out. An opaque frame draws the same.
+         */screenRefraction: Bool, 
         /**
          * Vertex attributes it reads: `"color"`, `"uv0"`, `"uv1"`.
          */requires: [String], 
@@ -5490,6 +5773,8 @@ public struct TrideMaterialGraph {
         self.name = name
         self.blending = blending
         self.castShadows = castShadows
+        self.receiveShadows = receiveShadows
+        self.screenRefraction = screenRefraction
         self.requires = requires
         self.instanceColors = instanceColors
         self.groups = groups
@@ -5516,6 +5801,12 @@ extension TrideMaterialGraph: Equatable, Hashable {
         if lhs.castShadows != rhs.castShadows {
             return false
         }
+        if lhs.receiveShadows != rhs.receiveShadows {
+            return false
+        }
+        if lhs.screenRefraction != rhs.screenRefraction {
+            return false
+        }
         if lhs.requires != rhs.requires {
             return false
         }
@@ -5537,6 +5828,8 @@ extension TrideMaterialGraph: Equatable, Hashable {
         hasher.combine(name)
         hasher.combine(blending)
         hasher.combine(castShadows)
+        hasher.combine(receiveShadows)
+        hasher.combine(screenRefraction)
         hasher.combine(requires)
         hasher.combine(instanceColors)
         hasher.combine(groups)
@@ -5557,6 +5850,8 @@ public struct FfiConverterTypeTrideMaterialGraph: FfiConverterRustBuffer {
                 name: FfiConverterString.read(from: &buf), 
                 blending: FfiConverterString.read(from: &buf), 
                 castShadows: FfiConverterBool.read(from: &buf), 
+                receiveShadows: FfiConverterBool.read(from: &buf), 
+                screenRefraction: FfiConverterBool.read(from: &buf), 
                 requires: FfiConverterSequenceString.read(from: &buf), 
                 instanceColors: FfiConverterBool.read(from: &buf), 
                 groups: FfiConverterSequenceTypeTrideMaterialGraphGroup.read(from: &buf), 
@@ -5570,6 +5865,8 @@ public struct FfiConverterTypeTrideMaterialGraph: FfiConverterRustBuffer {
         FfiConverterString.write(value.name, into: &buf)
         FfiConverterString.write(value.blending, into: &buf)
         FfiConverterBool.write(value.castShadows, into: &buf)
+        FfiConverterBool.write(value.receiveShadows, into: &buf)
+        FfiConverterBool.write(value.screenRefraction, into: &buf)
         FfiConverterSequenceString.write(value.requires, into: &buf)
         FfiConverterBool.write(value.instanceColors, into: &buf)
         FfiConverterSequenceTypeTrideMaterialGraphGroup.write(value.groups, into: &buf)
@@ -9415,6 +9712,187 @@ public func FfiConverterTypeTrideSkinPart_lower(_ value: TrideSkinPart) -> RustB
 
 
 /**
+ * The one map a shown stack draws.
+ */
+public struct TrideSkyMap {
+    public var source: TrideEnvironmentSourceRef
+    /**
+     * Texel multiplier: intensity / 38 400.
+     */
+    public var scale: Double
+    /**
+     * How much of what is below it the map covers.
+     */
+    public var alpha: Double
+    /**
+     * Column-major 3×3, the map's rotation in the light's world.
+     */
+    public var rotation: [Double]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(source: TrideEnvironmentSourceRef, 
+        /**
+         * Texel multiplier: intensity / 38 400.
+         */scale: Double, 
+        /**
+         * How much of what is below it the map covers.
+         */alpha: Double, 
+        /**
+         * Column-major 3×3, the map's rotation in the light's world.
+         */rotation: [Double]) {
+        self.source = source
+        self.scale = scale
+        self.alpha = alpha
+        self.rotation = rotation
+    }
+}
+
+
+
+extension TrideSkyMap: Equatable, Hashable {
+    public static func ==(lhs: TrideSkyMap, rhs: TrideSkyMap) -> Bool {
+        if lhs.source != rhs.source {
+            return false
+        }
+        if lhs.scale != rhs.scale {
+            return false
+        }
+        if lhs.alpha != rhs.alpha {
+            return false
+        }
+        if lhs.rotation != rhs.rotation {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(source)
+        hasher.combine(scale)
+        hasher.combine(alpha)
+        hasher.combine(rotation)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideSkyMap: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideSkyMap {
+        return
+            try TrideSkyMap(
+                source: FfiConverterTypeTrideEnvironmentSourceRef.read(from: &buf), 
+                scale: FfiConverterDouble.read(from: &buf), 
+                alpha: FfiConverterDouble.read(from: &buf), 
+                rotation: FfiConverterSequenceDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideSkyMap, into buf: inout [UInt8]) {
+        FfiConverterTypeTrideEnvironmentSourceRef.write(value.source, into: &buf)
+        FfiConverterDouble.write(value.scale, into: &buf)
+        FfiConverterDouble.write(value.alpha, into: &buf)
+        FfiConverterSequenceDouble.write(value.rotation, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideSkyMap_lift(_ buf: RustBuffer) throws -> TrideSkyMap {
+    return try FfiConverterTypeTrideSkyMap.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideSkyMap_lower(_ value: TrideSkyMap) -> RustBuffer {
+    return FfiConverterTypeTrideSkyMap.lower(value)
+}
+
+
+/**
+ * A shown stack: `over + (1 − over.a) × (alpha × (map × scale, 1) + (1 − alpha) × under)`,
+ * premultiplied RGBA (length 4 each).
+ */
+public struct TrideSkyStack {
+    public var map: TrideSkyMap?
+    public var over: [Double]
+    public var under: [Double]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(map: TrideSkyMap?, over: [Double], under: [Double]) {
+        self.map = map
+        self.over = over
+        self.under = under
+    }
+}
+
+
+
+extension TrideSkyStack: Equatable, Hashable {
+    public static func ==(lhs: TrideSkyStack, rhs: TrideSkyStack) -> Bool {
+        if lhs.map != rhs.map {
+            return false
+        }
+        if lhs.over != rhs.over {
+            return false
+        }
+        if lhs.under != rhs.under {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(map)
+        hasher.combine(over)
+        hasher.combine(under)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTrideSkyStack: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TrideSkyStack {
+        return
+            try TrideSkyStack(
+                map: FfiConverterOptionTypeTrideSkyMap.read(from: &buf), 
+                over: FfiConverterSequenceDouble.read(from: &buf), 
+                under: FfiConverterSequenceDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TrideSkyStack, into buf: inout [UInt8]) {
+        FfiConverterOptionTypeTrideSkyMap.write(value.map, into: &buf)
+        FfiConverterSequenceDouble.write(value.over, into: &buf)
+        FfiConverterSequenceDouble.write(value.under, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideSkyStack_lift(_ buf: RustBuffer) throws -> TrideSkyStack {
+    return try FfiConverterTypeTrideSkyStack.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTrideSkyStack_lower(_ value: TrideSkyStack) -> RustBuffer {
+    return FfiConverterTypeTrideSkyStack.lower(value)
+}
+
+
+/**
  * Soft shadow options (DPCF / PCSS).
  */
 public struct TrideSoftShadowOptions {
@@ -12693,6 +13171,54 @@ fileprivate struct FfiConverterOptionTypeTrideEnvironmentDescriptor: FfiConverte
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeTrideEnvironmentFrame: FfiConverterRustBuffer {
+    typealias SwiftType = TrideEnvironmentFrame?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeTrideEnvironmentFrame.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeTrideEnvironmentFrame.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeTrideEnvironmentSourceRef: FfiConverterRustBuffer {
+    typealias SwiftType = TrideEnvironmentSourceRef?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeTrideEnvironmentSourceRef.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeTrideEnvironmentSourceRef.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeTrideGeneratedGeometry: FfiConverterRustBuffer {
     typealias SwiftType = TrideGeneratedGeometry?
 
@@ -13021,6 +13547,30 @@ fileprivate struct FfiConverterOptionTypeTrideSceneRecord: FfiConverterRustBuffe
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeTrideSceneRecord.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeTrideSkyMap: FfiConverterRustBuffer {
+    typealias SwiftType = TrideSkyMap?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeTrideSkyMap.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeTrideSkyMap.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -14351,9 +14901,6 @@ private var initializationResult: InitializationResult = {
     if (uniffi_tride_ffi_checksum_method_tridescene_asset_bytes() != 57501) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_tride_ffi_checksum_method_tridescene_background_color() != 61595) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_tride_ffi_checksum_method_tridescene_begin_audio() != 28566) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -14390,7 +14937,10 @@ private var initializationResult: InitializationResult = {
     if (uniffi_tride_ffi_checksum_method_tridescene_end_audio() != 19419) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_tride_ffi_checksum_method_tridescene_environment() != 44967) {
+    if (uniffi_tride_ffi_checksum_method_tridescene_environment() != 39062) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_tride_ffi_checksum_method_tridescene_environment_frame() != 21429) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tride_ffi_checksum_method_tridescene_fire_trigger() != 21272) {
