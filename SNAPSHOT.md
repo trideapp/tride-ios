@@ -2,11 +2,11 @@
 
 | | |
 |---|---|
-| Tride commit | `7b82a29de` |
-| Runtime commit | `a5d9f148` — what `TrideKitScene.buildInfo.commit` reports |
-| Date | 2026-11-16 |
-| Scene format | 0.77.0 — TrideKit opens `.trd` of this format and older |
-| Runtime (FFI) | 0.0.80 |
+| Tride commit | `e693bbd64` |
+| Runtime commit | `661025e1` — what `TrideKitScene.buildInfo.commit` reports |
+| Date | 2026-11-17 |
+| Scene format | 0.78.0 — TrideKit opens `.trd` of this format and older |
+| Runtime (FFI) | 0.0.81 |
 | Filament | 1.77.1 (built from Google's source with Tride's patches) |
 
 Tride Editor — of the same release (the `tride-editor` stream) or of a snapshot of the same day

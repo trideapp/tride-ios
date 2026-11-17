@@ -4538,7 +4538,7 @@ public func FfiConverterTypeTrideEnvironmentLight_lower(_ value: TrideEnvironmen
 
 /**
  * What an environment shows and lights with, flat: `kind` `"color" | "preset" |
- * "custom"`; `name` the preset name or the custom retained-blob uid (empty for a colour);
+ * "custom" | "none"`; `name` the preset name or the custom retained-blob uid (empty for a colour);
  * `color` linear RGB for a colour (empty otherwise).
  */
 public struct TrideEnvironmentSourceRef {

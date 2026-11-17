@@ -1,4 +1,4 @@
-# TrideKit for iOS — Tride 0.17.0
+# TrideKit for iOS — Tride 0.18.0
 
 Plays Tride scenes (`.trd`) in an iOS app: the Tride runtime, the Filament renderer and a SwiftUI view on
 top of them. A scene is built in Tride Editor ([tride-editor](https://github.com/trideapp/tride-editor))
@@ -22,7 +22,7 @@ what changed — `CHANGELOG.md`.
 ## In your app
 
 1. File → Add Package Dependencies… → `https://github.com/trideapp/tride-ios` → Dependency Rule
-   "Up to Next Major Version" from 0.17.0.
+   "Up to Next Major Version" from 0.18.0.
 2. Add the **TrideKit** product to your app target (it also exposes the runtime's types — `TrideValue`
    and others; a separate **TrideCore** is only for a target that needs no rendering).
 3. In the target's Build Settings: Excluded Architectures → "+" for Any iOS Simulator SDK → `x86_64`
