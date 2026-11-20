@@ -35,6 +35,20 @@ enum RenderRate {
     static func refusalMessage(_ requested: Int) -> String {
         "preferredFPS \(requested) is not a frame rate (it must be above 0) — the view keeps its default rate"
     }
+
+    /// What Filament hears of the pace (`FilamentBridge.setFrameRate`), so its dynamic resolution
+    /// aims at the frame time the view really has: the display's refresh rate and
+    /// `interval = round(refreshRate / drawRate)`, at least 1. `drawRate` is what the view draws
+    /// (`preferredFPS`, else 60), so no rate keeps today's 16.7 ms target on 60 and 120 Hz screens.
+    /// The display rate is the screen's maximum (0 or less = 60); an iPhone without
+    /// `CADisableMinimumFrameDurationOnPhone` is held at 60 by the system, so 60 there.
+    static func filamentPace(drawRate: Int, screenMaximum: Int, phoneHeldAt60: Bool) -> (refreshRate: Double, interval: Int) {
+        var refresh = screenMaximum > 0 ? screenMaximum : 60
+        if phoneHeldAt60 { refresh = min(refresh, 60) }
+        let draws = max(1, drawRate)
+        let interval = Int((Double(refresh) / Double(draws)).rounded())
+        return (Double(refresh), min(255, max(1, interval)))
+    }
 }
 
 /// Which display callbacks wake the scene at a render rate: a wake is due once the time
@@ -135,6 +149,9 @@ final class TickDriver {
     /// The render rate the link wakes at; `nil` = every display frame.
     var preferredRate: Int? { clock.pacer.fps }
 
+    /// The longest step one wake hands the core (`TickClock.maxStepMs`).
+    var maxStepMs: Float { clock.maxStepMs }
+
     init(onTick: @escaping (Float) -> Void) {
         self.onTick = onTick
     }
@@ -217,6 +234,8 @@ final class TickDriver {
     private var pacer = FramePacer()
 
     var preferredRate: Int? { pacer.fps }
+
+    var maxStepMs: Float { TickClock.maxFrameMs }
 
     init(onTick: @escaping (Float) -> Void) {
         self.onTick = onTick

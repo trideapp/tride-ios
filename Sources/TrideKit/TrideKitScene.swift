@@ -11,6 +11,8 @@
 ///   (`TrideKitInputsReport`) names what was applied, refused with a code, unknown or untouched.
 /// - `advance(scriptJSON:)` — replay a host script in one call and show its final state: open a
 ///   scene "at minute 25" of its timer.
+/// - `tickMode` / `defaultTickMode` (`TrideKitTickMode`) — the steps on the preparation queue (the
+///   default) or on the main thread (the old mode, kept for one release).
 /// - Sound the scene hears (`TrideKitScene+Audio`): `attachAudioTrack(url:input:loop:)`,
 ///   `attachAudioPlayer(_:input:)`, `attachAudioEngine(_:node:input:)`, `detachAudio(input:)`,
 ///   `audioInputs`.
@@ -40,9 +42,13 @@
 ///   `trigger`, `setInputs`, `getBinding`, `availableBindings`, `currentState`, layers, `bindInput`, …) are
 ///   `nonisolated`.
 /// - Ticks run even when Metal bridge is nil so headless smoke tests still advance SM state.
-/// - Scene signals reach handlers on the main actor right AFTER the tick's mutations went to the
-///   bridge (same frame), in the order the runtime produced them; `currentState()` stays the LAST
-///   layer's state. Subscribe before `attachBridge` / `play()` to see the initial `onEnter` events.
+/// - The tick loop's steps run on TrideKit's preparation queue (`tickMode`): a wake applies
+///   the frame the queue finished, then queues the next tick — the picture one display frame behind.
+///   Scene signals reach handlers on the main actor right AFTER their tick's mutations went to the
+///   bridge (the frame that shows them), in the order the runtime produced them; `currentState()`
+///   stays the LAST layer's state, as the last finished tick left it. `tickOnce`, `advance`,
+///   `reset`, `pause`, `pick`, `attachBridge` and new render knobs apply the frame in flight first
+///   (`settleFrame`). `tickMode` `.mainThread` is the old path, for one release. Subscribe before `attachBridge` / `play()` to see the initial `onEnter` events.
 /// - Ticks are changed-only: a value holds until the core writes it again. Ticks before
 ///   `attachBridge` reach no renderer, so attaching asks the core for a full frame first. After
 ///   `reset()` the core's frame is whole: an animated render setting it does not carry goes back
@@ -143,10 +149,14 @@ public struct TrideKitSubscription: Hashable, Sendable {
     fileprivate let id: UInt64
 }
 
+/// A scene event or a layer's transition, as the tick raised it.
+typealias SceneSignal = SceneSignalInbox.Signal
+
 /// Takes the runtime's callbacks during `TrideScene.tick` — they fire synchronously on the ticking
-/// thread, BEFORE the tick's mutations reach the bridge — and keeps them, in order, until
-/// `TrideKitScene` hands them to the host after dispatch.
-private final class SceneSignalInbox: TrideOutgoingEventListener, TrideLayerStateChangeListener,
+/// thread (the preparation queue or the main thread), BEFORE the tick's mutations reach the bridge —
+/// and keeps them, in order, until the tick's frame is applied and `TrideKitScene` hands them to the
+/// host after dispatch.
+final class SceneSignalInbox: TrideOutgoingEventListener, TrideLayerStateChangeListener,
     @unchecked Sendable
 {
     enum Signal {
@@ -255,6 +265,37 @@ public final class TrideKitScene {
 
     @ObservationIgnored
     private var tickDriver: TickDriver?
+
+    /// Which thread ticks this scene: `.background` — TrideKit's preparation queue, the
+    /// frame shown one display frame later; `.mainThread` — the main thread, as before 0.19.0.
+    /// Starts at `defaultTickMode`. A change waits for the frame in flight and takes effect at the
+    /// next wake.
+    public var tickMode: TrideKitTickMode = .background {
+        didSet {
+            guard tickMode != oldValue else { return }
+            settleFrame()
+            dispatcher.defersTrunks = tickMode == .mainThread
+            // A trunk the main-thread tick deferred has no next deferral to wait for.
+            if tickMode == .background, let bridge, dispatcher.flushDeferredTrunks(into: bridge) {
+                bridge.setNeedsRender()
+            }
+        }
+    }
+
+    /// The tick mode of every scene made from now on: `.background` by default. One line takes an
+    /// app back to the main-thread tick for this release — `TrideKitScene.defaultTickMode =
+    /// .mainThread` before the first scene loads; the switch goes in 0.20.0.
+    public static var defaultTickMode: TrideKitTickMode = .background
+
+    /// The frame the preparation queue is making; at most one per scene.
+    @ObservationIgnored
+    private var inFlight: PreparedFrame?
+    /// Time of the wakes that found the frame unfinished — handed to the next tick.
+    @ObservationIgnored
+    private var carriedMs: Float = 0
+    /// Counters of the background tick (`preparationReport`).
+    @ObservationIgnored
+    private var preparation = PreparationCounters()
     /// The showing view's render rate: the tick loop wakes at most this often; `nil` = every
     /// display frame. Set by the view, kept across `pause()` / `play()`.
     @ObservationIgnored
@@ -281,13 +322,25 @@ public final class TrideKitScene {
     /// - Throws: `TrideError` for an archive the runtime cannot read or a scene it refuses (e.g. one
     ///   from a newer editor).
     public convenience init(trdBytes: Data) throws {
-        try self.init(parsed: Self.parse(trdBytes))
+        try self.init(parsed: Self.parse(trdBytes), bundle: nil)
+    }
+
+    /// Load a `.trd` that ships in `bundle` — a Swift package's `Bundle.module`, say. The Metal
+    /// libraries the `TrideMaterials` plugin built for it are looked for there, then in `Bundle.main`.
+    public convenience init(trdBytes: Data, bundle: Bundle) throws {
+        try self.init(parsed: Self.parse(trdBytes), bundle: bundle)
     }
 
     /// Load a `.trd`, reading the archive and building the runtime off the main thread.
     public static func load(_ trdBytes: Data) async throws -> TrideKitScene {
         let parsed = try await Task.detached(priority: .userInitiated) { try parse(trdBytes) }.value
-        return try TrideKitScene(parsed: parsed)
+        return try TrideKitScene(parsed: parsed, bundle: nil)
+    }
+
+    /// `load(_:)` for a `.trd` that ships in `bundle` (see `init(trdBytes:bundle:)`).
+    public static func load(_ trdBytes: Data, bundle: Bundle) async throws -> TrideKitScene {
+        let parsed = try await Task.detached(priority: .userInitiated) { try parse(trdBytes) }.value
+        return try TrideKitScene(parsed: parsed, bundle: bundle)
     }
 
     /// What loading produces before the scene is wired on the main actor. The runtime handle is safe to
@@ -302,11 +355,14 @@ public final class TrideKitScene {
         Parsed(scene: try TrideScene.load(trdBytes: trdBytes), bytes: trdBytes.count)
     }
 
-    private init(parsed: Parsed) throws {
+    private init(parsed: Parsed, bundle: Bundle?) throws {
         self.trideScene = parsed.scene
         // Only the pointers whose value moved; the bridge holds the rest.
         try trideScene.setChangedOnly(enabled: true)
         self.dispatcher = PointerDispatcher(scene: trideScene)
+        self.tickMode = Self.defaultTickMode
+        dispatcher.defersTrunks = tickMode == .mainThread
+        dispatcher.materialBundles = PrecompiledMaterials.bundles(scene: bundle)
         dispatcher.report = { [weak self] in self?.note($0) }
         dispatcher.hostImages = hostImages
         _ = try trideScene.subscribeEvents(listener: signals)
@@ -360,6 +416,7 @@ public final class TrideKitScene {
         TrideKitThreadRule.requireMain()
         let knobs = overrides == TrideRenderOverrides() ? nil : overrides
         guard knobs != renderOverrides else { return }
+        settleFrame()
         renderOverrides = knobs
         guard let bridge, !bridge.isDisposed else { return }
         applyRenderSettings(to: bridge)
@@ -491,6 +548,8 @@ public final class TrideKitScene {
     /// scene was not built in is addressed by the core's record all the same.
     @_spi(TrideTesting) public func attachBridge(_ bridge: FilamentBridge) {
         TrideKitThreadRule.requireMain()
+        // The frame in flight was prepared for the view it shows in now: it lands there first.
+        settleFrame()
         // One view shows one scene: a view still showing it stops following it from here on.
         if let shown = self.bridge, shown !== bridge, !shown.isDisposed {
             note(TrideKitDiagnostic(
@@ -610,6 +669,8 @@ public final class TrideKitScene {
     /// Every node under `point`, nearest first — empty when no listener of the scene targets a node.
     public func pick(at point: CGPoint) -> [TrideKitHit] {
         TrideKitThreadRule.requireMain()
+        // Pick what the view shows: the frame in flight lands first.
+        settleFrame()
         pushViewport()
         return trideScene.pick(x: Float(point.x), y: Float(point.y)).map(TrideKitHit.init)
     }
@@ -719,8 +780,9 @@ public final class TrideKitScene {
         (0..<layerCount).first { self.layerId(at: $0) == layerId }.flatMap { layerCurrentState(at: $0) }
     }
 
-    /// Receive the events the scene reports — on the main actor, right after the
-    /// tick's mutations went to the bridge, so the host reacts in the same frame. Handlers run in
+    /// Receive the events the scene reports — on the main actor, right after their
+    /// tick's mutations went to the bridge, so the host reacts in the frame that shows them (the
+    /// tick ran off the main thread, the picture one display frame behind it). Handlers run in
     /// registration order; a handler must not tick the scene.
     @discardableResult
     public func subscribeEvents(
@@ -781,7 +843,7 @@ public final class TrideKitScene {
             deliverDiagnostics()
         }
         let driver = TickDriver { [weak self] dtMs in
-            self?.tickAndDispatch(dtMs: dtMs)
+            self?.wake(dtMs: dtMs)
         }
         driver.setPreferredRate(wakeRate)
         driver.start()
@@ -810,6 +872,9 @@ public final class TrideKitScene {
     /// reset, call `reset()`.
     public func pause() {
         TrideKitThreadRule.requireMain()
+        // The frame in flight is shown: a paused scene stands where its last tick left it.
+        settleFrame()
+        carriedMs = 0
         tickDriver?.stop()
         tickDriver = nil
         isPlaying = false
@@ -824,6 +889,7 @@ public final class TrideKitScene {
     /// trigger: fire it with `trigger("reset")`.
     public func reset() throws {
         TrideKitThreadRule.requireMain()
+        settleFrame()
         try trideScene.reset()
         // The core hands out its whole frame after a reset: what it no longer animates goes back to
         // the scene's own value.
@@ -834,6 +900,8 @@ public final class TrideKitScene {
     /// tests can drive the scene without a runloop.
     public func tickOnce(dtMs: Float) {
         TrideKitThreadRule.requireMain()
+        // Synchronous whatever the mode: the frame in flight lands, then this step on this thread.
+        settleFrame()
         tickAndDispatch(dtMs: dtMs)
     }
 
@@ -845,6 +913,7 @@ public final class TrideKitScene {
     @discardableResult
     public func advance(scriptJSON: String) throws -> TrideKitAdvance {
         TrideKitThreadRule.requireMain()
+        settleFrame()
         audio.hear(trideScene) { note($0) }
         pushViewport(onlyIfMoved: true)
         let result = try trideScene.advance(scriptJson: scriptJSON)
@@ -1048,6 +1117,121 @@ public final class TrideKitScene {
         deliverSignals()
     }
 
+    // MARK: - The tick off the main thread
+
+    /// A wake of the tick loop. On the preparation queue (`.background`): the frame the queue
+    /// finished is applied — its mutations to the bridge, then its signals to the handlers — and the
+    /// next tick is queued; a frame not finished yet keeps the picture, queues no second tick and
+    /// hands its time to the next one (TickClock's cap of two steps). On the main thread: today's step.
+    func wake(dtMs: Float) {
+        guard tickMode == .background else {
+            tickAndDispatch(dtMs: dtMs)
+            return
+        }
+        preparation.wakes += 1
+        if let frame = inFlight {
+            guard frame.isDone else {
+                preparation.unfinished += 1
+                carriedMs += dtMs
+                return
+            }
+            inFlight = nil
+            apply(frame)
+        }
+        let cap = 2 * (tickDriver?.maxStepMs ?? TickClock.maxFrameMs)
+        let step = min(dtMs + carriedMs, cap)
+        carriedMs = 0
+        submit(dtMs: step)
+    }
+
+    /// Queue a tick: what every sound sounds like and the view's camera go to the inbox, the seal
+    /// closes this tick's inputs (the main thread decides each input's tick), the queue ticks and reads what the dispatcher will need.
+    private func submit(dtMs: Float) {
+        tickCount += 1
+        audio.hear(trideScene) { note($0) }
+        pushViewport(onlyIfMoved: true)
+        do {
+            try trideScene.sealInputs()
+        } catch {
+            note(TrideKitDiagnostic(kind: .runtime, subject: "sealInputs", message: error.localizedDescription))
+        }
+        let frame = PreparedFrame(dtMs: dtMs)
+        let job = PrepareJob(
+            frame: frame, core: trideScene, signals: signals, plan: bridge.map { _ in dispatcher.pullPlan() })
+        inFlight = frame
+        ScenePreparation.queue.async { job.run() }
+    }
+
+    /// A frame the queue finished, on the bridge — the core is idle meanwhile (nothing is queued
+    /// until this returns). The tick's signals reach the handlers after its mutations reached the
+    /// bridge (the frame that shows them).
+    private func apply(_ frame: PreparedFrame) {
+        let start = DispatchTime.now().uptimeNanoseconds
+        preparation.applied += 1
+        preparation.tickNs += frame.tickNs
+        preparation.pullNs += frame.pullNs
+        guard let result = frame.result else {
+            note(TrideKitDiagnostic(
+                kind: .runtime, subject: "tick", message: frame.failure?.localizedDescription ?? "no tick result"))
+            deliverSignals(frame.signals)
+            return
+        }
+        for diagnostic in result.diagnostics { note(evaluationDiagnostic(diagnostic)) }
+        if let bridge, !result.mutations.isEmpty {
+            let interval = signposts.beginInterval("dispatch", "\(result.mutations.count) mutations")
+            dispatcher.pulls = frame.pulls
+            dispatcher.dispatch(mutations: result.mutations, bridge: bridge)
+            dispatcher.pulls = nil
+            bridge.setNeedsRender()
+            signposts.endInterval("dispatch", interval)
+            releaseUnshownPictures()
+        }
+        if let bridge, !result.bonePalettes.isEmpty {
+            dispatcher.applyBonePalettes(result.bonePalettes, to: bridge)
+            bridge.setNeedsRender()
+        }
+        preparation.misses += frame.pulls.misses
+        preparation.applyNs += DispatchTime.now().uptimeNanoseconds - start
+        deliverSignals(frame.signals)
+    }
+
+    /// The frame in flight, waited for and applied now — before a synchronous step (`tickOnce`,
+    /// `advance`, `reset`), `pause`, `pick`, a new bridge, new render knobs, a mode change
+    /// — what follows sees the core and the view in the same state.
+    func settleFrame() {
+        guard let frame = inFlight else { return }
+        inFlight = nil
+        let start = DispatchTime.now().uptimeNanoseconds
+        frame.wait()
+        preparation.settleWaitNs += DispatchTime.now().uptimeNanoseconds - start
+        apply(frame)
+    }
+
+    /// A frame is being prepared (tests: hold the next wake until it is done).
+    @_spi(TrideTesting) public var hasFrameInFlight: Bool { inFlight != nil }
+
+    /// Wait for the frame in flight without applying it — the next wake applies it (tests).
+    @_spi(TrideTesting) public func waitForFrameInFlight() { inFlight?.wait() }
+
+    /// One wake of the tick loop with `dtMs`, as the display link makes it (tests, a host's own loop).
+    @_spi(TrideTesting) public func wakeOnce(dtMs: Float) {
+        TrideKitThreadRule.requireMain()
+        wake(dtMs: dtMs)
+    }
+
+    /// The background tick's counters since load: wakes, frames applied, wakes that found the frame
+    /// unfinished, core reads the frames missed, and ms the queue ticked and read, the main thread
+    /// applied and waited (tests, measuring hosts).
+    @_spi(TrideTesting) public func preparationReport() -> [String: Double] {
+        let ms = { (ns: UInt64) in Double(ns) / 1e6 }
+        return [
+            "wakes": Double(preparation.wakes), "applied": Double(preparation.applied),
+            "unfinished": Double(preparation.unfinished), "misses": Double(preparation.misses),
+            "queueTickMs": ms(preparation.tickNs), "queuePullMs": ms(preparation.pullNs),
+            "applyMs": ms(preparation.applyNs), "settleWaitMs": ms(preparation.settleWaitNs),
+        ]
+    }
+
     /// Queue a problem for `subscribeDiagnostics` and log it — each `(kind, subject, message)` once per
     /// scene: a binding that fails every step is reported once, not sixty times a second.
     func note(_ diagnostic: TrideKitDiagnostic) {
@@ -1071,9 +1255,9 @@ public final class TrideKitScene {
 
     /// Hand this tick's scene signals to the handlers, in the runtime's order. Iterates over
     /// snapshots, so a handler may unsubscribe (itself or others) while being called.
-    private func deliverSignals() {
+    private func deliverSignals(_ raised: [SceneSignal]? = nil) {
         deliverDiagnostics()
-        for signal in signals.drain() {
+        for signal in raised ?? signals.drain() {
             switch signal {
             case .event(let event):
                 for entry in eventHandlers { entry.handler(event) }
@@ -1082,6 +1266,18 @@ public final class TrideKitScene {
             }
         }
     }
+}
+
+/// What the background tick did (`TrideKitScene.preparationReport`).
+struct PreparationCounters {
+    var wakes = 0
+    var applied = 0
+    var unfinished = 0
+    var misses = 0
+    var tickNs: UInt64 = 0
+    var pullNs: UInt64 = 0
+    var applyNs: UInt64 = 0
+    var settleWaitNs: UInt64 = 0
 }
 
 @available(iOS 17.0, macCatalyst 17.0, *)

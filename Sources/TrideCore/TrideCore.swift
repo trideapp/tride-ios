@@ -784,7 +784,9 @@ public protocol TrideSceneProtocol : AnyObject {
     func generatorModuleTransforms(id: String, symbol: String)  -> Data
     
     /**
-     * Read the current view-model value (see [`tride_runtime_api::RuntimeHandle::get_binding`]).
+     * Read the current view-model value (see [`tride_runtime_api::RuntimeHandle::get_binding`]):
+     * the last write still waiting for the tick, else the scene's as the last finished tick left
+     * it (with what landed since) — never waiting for a tick in progress.
      */
     func getBinding(name: String) throws  -> TrideValue
     
@@ -1005,6 +1007,17 @@ public protocol TrideSceneProtocol : AnyObject {
     func scroll(offset: Double, extent: Double, sceneTop: Double, sceneHeight: Double) throws 
     
     /**
+     * Everything the host wrote so far — bindings, triggers, batches, pointer events — belongs
+     * to the next [`Self::tick`]; what it writes after this call waits for the tick after. Call
+     * it, once per tick, on the thread that orders the ticks when the tick itself runs on another
+     * thread; a tick with no seal pending takes everything written before it.
+     *
+     * # Errors
+     * [`TrideError::Internal`] only on mutex poisoning.
+     */
+    func sealInputs() throws 
+    
+    /**
      * What sounds now — call it every frame before `tick`: `input` is heard at
      * `audible_time_s` of its audio time (a track: position minus the output latency), its
      * probes times `gain`.
@@ -1016,7 +1029,8 @@ public protocol TrideSceneProtocol : AnyObject {
     func setAudioTime(input: String, audibleTimeS: Double, gain: Float) throws 
     
     /**
-     * Set a named view-model binding to the given typed value.
+     * Set a named view-model binding to the given typed value. Checked now, it waits in the
+     * inbox for the next [`Self::tick`] — never for a tick in progress.
      *
      * # Errors
      * Returns [`TrideError::InvalidBinding`] when the name is unknown
@@ -1548,7 +1562,9 @@ open func generatorModuleTransforms(id: String, symbol: String) -> Data {
 }
     
     /**
-     * Read the current view-model value (see [`tride_runtime_api::RuntimeHandle::get_binding`]).
+     * Read the current view-model value (see [`tride_runtime_api::RuntimeHandle::get_binding`]):
+     * the last write still waiting for the tick, else the scene's as the last finished tick left
+     * it (with what landed since) — never waiting for a tick in progress.
      */
 open func getBinding(name: String)throws  -> TrideValue {
     return try  FfiConverterTypeTrideValue.lift(try rustCallWithError(FfiConverterTypeTrideError.lift) {
@@ -1941,6 +1957,21 @@ open func scroll(offset: Double, extent: Double, sceneTop: Double, sceneHeight: 
 }
     
     /**
+     * Everything the host wrote so far — bindings, triggers, batches, pointer events — belongs
+     * to the next [`Self::tick`]; what it writes after this call waits for the tick after. Call
+     * it, once per tick, on the thread that orders the ticks when the tick itself runs on another
+     * thread; a tick with no seal pending takes everything written before it.
+     *
+     * # Errors
+     * [`TrideError::Internal`] only on mutex poisoning.
+     */
+open func sealInputs()throws  {try rustCallWithError(FfiConverterTypeTrideError.lift) {
+    uniffi_tride_ffi_fn_method_tridescene_seal_inputs(self.uniffiClonePointer(),$0
+    )
+}
+}
+    
+    /**
      * What sounds now — call it every frame before `tick`: `input` is heard at
      * `audible_time_s` of its audio time (a track: position minus the output latency), its
      * probes times `gain`.
@@ -1959,7 +1990,8 @@ open func setAudioTime(input: String, audibleTimeS: Double, gain: Float)throws  
 }
     
     /**
-     * Set a named view-model binding to the given typed value.
+     * Set a named view-model binding to the given typed value. Checked now, it waits in the
+     * inbox for the next [`Self::tick`] — never for a tick in progress.
      *
      * # Errors
      * Returns [`TrideError::InvalidBinding`] when the name is unknown
@@ -14961,7 +14993,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_tride_ffi_checksum_method_tridescene_generator_module_transforms() != 36317) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_tride_ffi_checksum_method_tridescene_get_binding() != 7342) {
+    if (uniffi_tride_ffi_checksum_method_tridescene_get_binding() != 44634) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tride_ffi_checksum_method_tridescene_image_failed() != 28791) {
@@ -15054,10 +15086,13 @@ private var initializationResult: InitializationResult = {
     if (uniffi_tride_ffi_checksum_method_tridescene_scroll() != 8139) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_tride_ffi_checksum_method_tridescene_seal_inputs() != 23511) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_tride_ffi_checksum_method_tridescene_set_audio_time() != 47024) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_tride_ffi_checksum_method_tridescene_set_binding() != 35949) {
+    if (uniffi_tride_ffi_checksum_method_tridescene_set_binding() != 53321) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tride_ffi_checksum_method_tridescene_set_changed_only() != 20563) {

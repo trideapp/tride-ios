@@ -30,14 +30,19 @@
 ///   false, a size that is not a finite number) is a problem, said once per pointer.
 /// - A re-evaluated trunk already on screen uploads on the next tick (`flushDeferredTrunks`), so
 ///   the core's re-evaluation and the upload do not share a frame; the first mesh is immediate.
+///   With the tick on the preparation queue (`defersTrunks` off) they never share one: the trunk
+///   uploads with its frame.
+/// - While a prepared frame is applied (`pulls`) the core's reads come from the frame
+///   (`CorePulls`); `pullPlan()` tells the queue which ones. The core is idle then: a read the plan
+///   missed goes to it and is counted (`CorePulls.misses`).
 /// - A parametric node has no mesh in the GLB — the core builds its datablock's mesh
 ///   (`datablockMesh`) and the bridge draws it as a generated mesh under the node, in the core's look.
 ///   A node a deformer bends draws the same way from the core's bent mesh
 ///   (`deformedMesh`, re-pulled on `/deformed/{uid}/geometry`): the core bends only a node with a
 ///   datablock, so a bent uid outside `datablockNodes` draws nothing (a problem, said once).
 /// - Node materials load at bind, before any mesh — each family's package from the
-///   archive (on a device, its precompiled Metal build when the app bundles one —
-///   `PrecompiledMaterials`), checked against the bridge's Filament first; their uniforms come from the core
+///   archive (on a device, its precompiled Metal build when the scene's bundle or the app's holds
+///   one — `PrecompiledMaterials`), checked against the bridge's Filament first; their uniforms come from the core
 ///   (`materialGraphValues`), again on every write to the slug — only the uniforms whose lanes moved
 ///   go to the bridge (`SentUniforms`); a node-graph input (`isGraphLeaf`) never moves
 ///   the look, so a tick writing only those does not pull it. Without a loaded package a file mesh
@@ -247,6 +252,79 @@ final class PointerDispatcher {
         self.scene = scene
     }
 
+    /// What this dispatcher draws, for the preparation queue's reads of the next frame.
+    func pullPlan() -> PullPlan {
+        var plan = PullPlan()
+        plan.modules = generatorModules.mapValues { $0.map { ($0.symbol, $0.datablock) } }
+        for (id, modules) in generatorModules {
+            for binding in modules {
+                let rows = (moduleParts[binding.datablock] ?? []).contains { part in
+                    (moduleMaterialParams[part.uid] ?? nil) != nil
+                        && moduleMaterialSlug[part.uid].map(instanceRowSlugs.contains) == true
+                }
+                if rows { plan.rowSymbols.insert(CorePulls.key(id, binding.symbol)) }
+            }
+        }
+        plan.registered = Set(moduleParts.keys)
+        plan.uploadedTrunk = uploadedTrunkEpoch
+        plan.pulsed = Set(generatorPulseLook.keys)
+        plan.parametric = parametricNodes.map { ($0.nodeUid, $0.datablockUid) }
+        plan.graphFamilies = materialGraphFamilies
+        plan.slotSlugs = slotSlugs
+        return plan
+    }
+
+    // The core's reads of a frame: from the queue's pulls while a prepared frame is applied.
+    private func coreGeometry(_ id: String) -> TrideGeneratedGeometry? {
+        if let pulls { return pulls.generatedGeometry(id, core: scene) }
+        return scene.generatedGeometry(id: id)
+    }
+
+    private func coreTransforms(_ id: String, _ symbol: String) -> Data {
+        if let pulls { return pulls.moduleTransforms(id, symbol, core: scene) }
+        return scene.generatorModuleTransforms(id: id, symbol: symbol)
+    }
+
+    private func coreColors(_ id: String, _ symbol: String) -> Data {
+        if let pulls { return pulls.moduleColors(id, symbol, core: scene) }
+        return scene.generatorModuleColors(id: id, symbol: symbol)
+    }
+
+    private func coreFlow(_ id: String) -> TridePulseTable? {
+        if let pulls { return pulls.flow(id, core: scene) }
+        return scene.generatorFlow(id: id)
+    }
+
+    private func coreDatablock(_ uid: String) -> TrideDatablockMesh? {
+        if let pulls { return pulls.datablockMesh(uid, core: scene) }
+        return scene.datablockMesh(uid: uid)
+    }
+
+    private func coreDeformed(_ uid: String) -> TrideDatablockMesh? {
+        if let pulls { return pulls.deformedMesh(uid, core: scene) }
+        return scene.deformedMesh(nodeUid: uid)
+    }
+
+    private func coreEnvironment() -> TrideEnvironmentFrame? {
+        if let pulls { return pulls.environmentFrame(core: scene) }
+        return scene.environmentFrame()
+    }
+
+    private func coreParams(_ slug: String) -> TrideMaterialParams? {
+        if let pulls { return pulls.params(slug, core: scene) }
+        return scene.materialParams(slug: slug)
+    }
+
+    private func coreGraph(_ slug: String, _ family: String) -> TrideMaterialGraph? {
+        if let pulls { return pulls.graph(slug, family, core: scene) }
+        return scene.materialGraph(slug: slug, family: family)
+    }
+
+    private func coreGraphValues(_ slug: String, _ family: String) -> [TrideMaterialGraphValue] {
+        if let pulls { return pulls.values(slug, family, core: scene) }
+        return scene.materialGraphValues(slug: slug, family: family)
+    }
+
     /// Per-tick accumulation of light-channel mutations for one slug. A colour lane fills the
     /// other lanes from the in-tick colour, then the live one (`liveColor`).
     private struct LightAccumulator {
@@ -406,6 +484,13 @@ final class PointerDispatcher {
     /// Re-evaluated trunks whose new mesh waits for the next tick (`flushDeferredTrunks`), with
     /// the trunk epoch they will hold.
     private var deferredTrunks: [(id: String, trunk: UInt64?)] = []
+    /// A re-evaluated trunk on screen waits for the next tick (`flushDeferredTrunks`) — the tick on
+    /// the main thread (`TrideKitTickMode.mainThread`); a tick on the preparation queue already ran
+    /// apart from the upload, so its frame uploads at once.
+    var defersTrunks = true
+    /// The core's reads the preparation queue made for the frame being applied; `nil`
+    /// = the core itself (a tick on the main thread, the bind).
+    var pulls: CorePulls?
     private var nextLookRevision: Int64 = 0
     /// Every node with a datablock, listed once at attach (`RecordScene.datablockNodes`).
     private var parametricNodes: [TrideParametricNode] = []
@@ -434,6 +519,11 @@ final class PointerDispatcher {
     }
     /// The app's pictures (`TrideKitScene.setImage`) the slots read their pixels from.
     var hostImages: HostImageStore?
+
+    /// Where the `TrideMaterials` side files are looked for: the scene's bundle, then the app's
+    /// (`PrecompiledMaterials.bundles(scene:)`).
+    var materialBundles: [Bundle] = [.main]
+
     /// What each photo slot shows on the bridge, by `slug\0family\0sampler`.
     private var slotBindings: [String: SlotBinding] = [:]
     /// Node material slugs with a photo slot on a loaded package — their groups are read again
@@ -546,7 +636,7 @@ final class PointerDispatcher {
                 guard let shipped = scene.assetBytes(uri: graph.packageUri) else { continue }
                 var package = shipped
                 do {
-                    if let built = try PrecompiledMaterials.package(for: shipped) {
+                    if let built = try PrecompiledMaterials.package(for: shipped, in: materialBundles) {
                         package = built
                         precompiled += 1
                     }
@@ -605,7 +695,7 @@ final class PointerDispatcher {
     /// last push, to every instance; nothing moved — no call.
     private func pushMaterialGraphValues(slug: String, family: String, into bridge: FilamentBridge) {
         let moved = sentUniforms.changes(
-            slug: slug, family: family, values: scene.materialGraphValues(slug: slug, family: family))
+            slug: slug, family: family, values: coreGraphValues(slug, family))
         guard !moved.isEmpty else { return }
         var values: [String: [NSNumber]] = [:]
         for value in moved {
@@ -698,7 +788,7 @@ final class PointerDispatcher {
         for node in parametricNodes where node.datablockUid == uid {
             uploadParametricNode(node, into: bridge)
         }
-        guard moduleParts[uid] != nil, let mesh = scene.datablockMesh(uid: uid) else { return }
+        guard moduleParts[uid] != nil, let mesh = coreDatablock(uid) else { return }
         let before = moduleParts[uid] ?? []
         guard let parts = registerModuleMesh(datablock: uid, mesh: mesh, into: bridge) else {
             problem(.load, uid, "the view rejected the rebuilt module mesh")
@@ -767,7 +857,7 @@ final class PointerDispatcher {
             return
         }
         // A node a deformer reaches draws its bent mesh, else its recipe's.
-        guard let mesh = scene.deformedMesh(nodeUid: node.nodeUid) ?? scene.datablockMesh(uid: node.datablockUid) else {
+        guard let mesh = coreDeformed(node.nodeUid) ?? coreDatablock(node.datablockUid) else {
             problem(.load, node.nodeUid, "parametric datablock \(node.datablockUid) could not be built — not drawn")
             return
         }
@@ -1081,7 +1171,7 @@ final class PointerDispatcher {
         guard let modules = generatorModules[id], !modules.isEmpty else { return }
         for binding in modules {
             if moduleParts[binding.datablock] == nil {
-                guard let mesh = scene.datablockMesh(uid: binding.datablock) else {
+                guard let mesh = coreDatablock(binding.datablock) else {
                     problem(.load, id, "module '\(binding.symbol)': datablock \(binding.datablock) could not be decoded — not drawn")
                     continue
                 }
@@ -1090,7 +1180,7 @@ final class PointerDispatcher {
                     continue
                 }
             }
-            let transforms = scene.generatorModuleTransforms(id: id, symbol: binding.symbol)
+            let transforms = coreTransforms(id, binding.symbol)
             // One batch per draw part over the same transforms and rows (`moduleParts`).
             for part in moduleParts[binding.datablock] ?? [] {
                 let params = moduleMaterialParams[part.uid] ?? nil
@@ -1102,7 +1192,7 @@ final class PointerDispatcher {
                     symbol: binding.symbol + part.suffix,
                     meshUid: part.uid,
                     transforms: transforms,
-                    colors: pullsRows ? scene.generatorModuleColors(id: id, symbol: binding.symbol) : nil,
+                    colors: pullsRows ? coreColors(id, binding.symbol) : nil,
                     parentGltfIndex: generatorHostIndex[id].map { NSNumber(value: $0) },
                     materialParams: params.map { moduleLookDictionary(datablock: part.uid, params: $0) }
                 )
@@ -1141,11 +1231,11 @@ final class PointerDispatcher {
             if slotSlugs.contains(slug) {
                 syncSlots(
                     slug: slug, family: family,
-                    groups: scene.materialGraph(slug: slug, family: family)?.groups ?? [], into: bridge)
+                    groups: coreGraph(slug, family)?.groups ?? [], into: bridge)
             }
         }
         guard lookWritten || paletteSent[slug] == nil else { return }
-        guard let params = scene.materialParams(slug: slug) else {
+        guard let params = coreParams(slug) else {
             warnUnknownPaletteOnce(slug)
             return
         }
@@ -1284,12 +1374,12 @@ final class PointerDispatcher {
     /// Pull the core buffers for `id` and upload them (create or update in place).
     private func uploadGeneratedMesh(id: String, into bridge: FilamentBridge) {
         let t0 = DispatchTime.now().uptimeNanoseconds
-        guard let geometry = scene.generatedGeometry(id: id) else {
+        guard let geometry = coreGeometry(id) else {
             problem(.load, id, "generator announced but has no geometry (its evaluation failed)")
             return
         }
         let t1 = DispatchTime.now().uptimeNanoseconds
-        let dict = Self.geometryDictionary(
+        var dict = Self.geometryDictionary(
             from: geometry,
             parentGltfIndex: generatorHostIndex[id],
             materialSlug: generatorMaterialSlug[id],
@@ -1298,6 +1388,8 @@ final class PointerDispatcher {
             objectUid: generatorHostUid[id],
             assetBytes: cachedAssetBytes
         )
+        // The streams the preparation queue packed for this geometry: the bridge only uploads them.
+        if let packed = pulls?.packed[id] { dict["packed"] = packed }
         let t2 = DispatchTime.now().uptimeNanoseconds
         if !bridge.upsertGeneratedMesh(id, geometry: dict) {
             problem(.load, id, "the view rejected the generated mesh (epoch \(geometry.epoch))")
@@ -1400,7 +1492,7 @@ final class PointerDispatcher {
     /// Pull the pulse table of `id` and hand it to the bridge; `nil` = every pulse left the tips.
     private func uploadGeneratorFlow(id: String, into bridge: FilamentBridge) {
         guard generatorPulseLook[id] != nil else { return }
-        let table = scene.generatorFlow(id: id).map(Self.pulseTableDictionary(from:))
+        let table = coreFlow(id).map(Self.pulseTableDictionary(from:))
         if !bridge.setGeneratedMeshFlow(id, table: table), table != nil {
             problem(.load, id, "the view rejected the pulse table (the trunk is not pulsed)")
         }
@@ -1809,7 +1901,7 @@ final class PointerDispatcher {
         }
 
         // The environment frame's numbers, whatever leaf moved (the core's formulas).
-        if environmentWritten, let frame = scene.environmentFrame() {
+        if environmentWritten, let frame = coreEnvironment() {
             bridge.updateEnvironment(FilamentBridgeEnvironmentValues(frame))
         }
 
@@ -1848,7 +1940,7 @@ final class PointerDispatcher {
         for id in dirtyGenerators {
             if let trunk = announcedTrunk[id], uploadedTrunkEpoch[id] == trunk {
                 syncModuleInstances(id: id, into: bridge)
-            } else if uploadedTrunkEpoch[id] != nil {
+            } else if defersTrunks, uploadedTrunkEpoch[id] != nil {
                 // A trunk already on screen takes its new mesh on the next tick: the core's
                 // re-evaluation and the upload (~10 ms each for a large grown tree on an
                 // iPhone 13) do not land in one frame. Its modules and pulses wait with it.

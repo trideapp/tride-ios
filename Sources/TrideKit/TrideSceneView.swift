@@ -2,8 +2,9 @@
 ///
 /// ## Public API
 /// - `TrideSceneView(scene:renderPolicy:pixelScale:preferredFPS:renderOverrides:handlesTouches:onLoaded:onError:)`.
-/// - `TrideSceneView.RenderPolicy` — `.continuous` (every display frame) or `.onDemand` (only frames a
-///   scene step changed: a paused or off-screen scene costs no GPU).
+/// - `TrideSceneView.RenderPolicy` — `.continuous` (every display frame; a paused scene without TAA only
+///   what changes) or `.onDemand` (only frames a scene step changed: a paused or off-screen scene costs
+///   no GPU).
 ///
 /// ## Non-obvious constraints
 /// - The view connects the scene before the first frame, inside the SwiftUI update; `onLoaded` /
@@ -14,6 +15,9 @@
 ///   (`.runtime`, subject `view`); a view shown again later (a card scrolled back) takes it back.
 /// - `handlesTouches` may change at any time; a touch in flight is cancelled on the scene.
 /// - `preferredFPS` may change at any time: the same view and scene go on at the new rate.
+/// - Every scene view of the app draws with one Filament engine and shares its materials; a view
+///   draws only while it shows on screen, and one more than a screen away gives its frame buffers
+///   back (its last frame stays) — `FilamentMetalView`.
 /// - `renderOverrides` may change at any time: the same view and scene draw with the new knobs from the
 ///   next frame, the scene's animations untouched.
 /// - The view builds the scene from the runtime's own description of it (the core's scene record);
@@ -28,7 +32,8 @@ import TrideCore
 public struct TrideSceneView: View {
     /// When the view draws a frame.
     public enum RenderPolicy: Sendable {
-        /// Every display frame — for scenes with temporal effects (TAA).
+        /// Every display frame while the view shows on screen — for scenes with temporal effects (TAA).
+        /// A paused scene without TAA draws only what changes: the same picture is not drawn again.
         case continuous
         /// Only frames a scene step changed: a paused scene, or one scrolled off screen, draws nothing.
         case onDemand

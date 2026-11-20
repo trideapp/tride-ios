@@ -10,7 +10,15 @@ not repeat it — it only reports facts and listens to what the scene answers.
 let scene = try await TrideKitScene.load(data)   // reads the archive off the main thread
 let same = try TrideKitScene(trdBytes: data)     // the same, on the calling thread
 // Both throw on a broken file or one from a newer editor.
+
+// A scene your Swift package holds as a resource: pass the package's bundle.
+let packaged = try await TrideKitScene.load(data, bundle: .module)
 ```
+
+`bundle:` says where the scene ships: TrideKit looks there, then in the app bundle, for the Metal
+libraries the **TrideMaterials** plug-in built for it. Without it only the app bundle is searched, so a
+scene from a package compiles its materials on the phone (`init(trdBytes:bundle:)` is the same, on the
+calling thread).
 
 Loading throws `TrideError`:
 
@@ -31,7 +39,7 @@ Loading throws `TrideError`:
 | `setImage(_:data:)`, `imageLoading(_:)`, `clearImage(_:)`, `imageInput(_:)` | the app's picture in an image input — see "Pictures from the app" (the first three throw for a name that is no image input) |
 | `bindInput(_:to:mapping:)` (`throws`), `unbindInput(_:)`, `boundInputs()` | bind a scroll source to one of the scene's number inputs, let go of it, list the bindings — see "The scene follows a scroll view" |
 | `scroll(offset:extent:sceneTop:sceneHeight:)`, `dragAxes()` | report the scroll view as it moves; ask which swipes the scene's own drags claim — same section |
-| `subscribeEvents(_:)` | the scene's events (`TrideKitEvent`: `name`, `payload: [String: TrideValue]`), on the main thread, in the same frame |
+| `subscribeEvents(_:)` | the scene's events (`TrideKitEvent`: `name`, `payload: [String: TrideValue]`), on the main thread, in the frame that shows what the same step changed |
 | `subscribeStateChanges(_:)` | state transitions per layer (`TrideKitStateChange`) |
 | `subscribeDiagnostics(_:)` | problems the scene runs into (`TrideKitDiagnostic`: `kind` — `evaluation` / `load` / `pointer` / `runtime`, `subject`, `message`), each once, after the tick that met it |
 | `currentState(ofLayer:)`, `layerCount`, `layerName(at:)` | where the state machine is now |
@@ -60,13 +68,28 @@ The same rule as TrideKit for Android:
   stops the app at that call with a message naming the call and the rule, instead of a crash in a later
   frame. Switch with `await MainActor.run { … }` or `DispatchQueue.main.async { … }`.
 
+**The scene's steps run off the main thread.** While the scene plays, TrideKit prepares each frame on
+one background queue of its own (every scene of the app shares it) and shows it on the main thread at
+the next display frame, so scrolling and your animations do not wait for a heavy scene. What you see:
+
+- The picture is one frame behind a touch or a written value (17 ms at 60 frames a second).
+- Events and state changes arrive in the frame that shows what the same step changed, in the scene's
+  order, on the main thread — as before.
+- `getBinding`, `currentState` and the layers' states read the last step shown; a value you just wrote
+  reads back at once.
+- `tickOnce`, `advance`, `reset`, `pause` and `pick` wait for the frame being prepared, then run as
+  before: when they return, the scene and the view agree.
+- `TrideKitScene.defaultTickMode = .mainThread` (before the first scene loads), or a scene's
+  `tickMode`, runs the steps on the main thread as TrideKit did before. The switch is there for this
+  release only.
+
 ## `TrideSceneView` — the view
 
 A SwiftUI view that draws the scene with Filament (Metal): `TrideSceneView(scene:)`.
 
 | | |
 |---|---|
-| `renderPolicy` | `.continuous` — every frame; `.onDemand` — only frames a scene step changed (saves battery) |
+| `renderPolicy` | `.continuous` — every frame while the view is on screen; `.onDemand` — only frames a scene step changed (saves battery). A view off screen draws nothing either way |
 | `pixelScale` | pixels per point; below the screen's (e.g. 2 on a 3× phone) costs the GPU less |
 | `preferredFPS` | frames drawn a second, e.g. `30` on a slow or hot phone; the scene's logic is woken no more often but still runs 60 steps a second (animations and timings stay the same). `nil` (default) — 60; above the screen's rate — the screen's (above 60 on ProMotion needs `CADisableMinimumFrameDurationOnPhone` in the app's Info.plist); 0 or less — the default and one diagnostic. Change it at any time: the scene is not reloaded |
 | `renderOverrides` | render switches over the scene's own settings, see "Render knobs"; `nil` (default) — the scene's settings. Change it at any time: the scene is not reloaded |
@@ -87,6 +110,11 @@ the earlier one is gone (a card scrolled back into a list) takes the scene back 
 
 Several views may be on one screen, each with its own scene; with `.onDemand` each draws on its own,
 also while the shaders of its first frames are still compiling.
+
+All views of an app share one Filament engine, so a second view costs little memory and opens fast.
+A view next to the screen (the neighbouring page of a pager) keeps everything and only stops drawing; a
+view further away gives its drawing surface back and keeps showing its last frame until it comes near
+again. On a memory warning the neighbours give their surfaces back too.
 
 ## Render knobs
 

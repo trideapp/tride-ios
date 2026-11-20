@@ -6,11 +6,14 @@
 ///   `render`/`dispose` through the coordinator.
 /// - `FilamentMetalView.RenderPolicy` (= `TrideSceneView.RenderPolicy`) — `.continuous` (every display frame, the default) or `.onDemand`
 ///   (only frames with something new: the bridge's `needsRender`, raised by a tick that moved the
-///   scene, a resize, the app returning to the foreground).
+///   scene, a resize, the app returning to the foreground). A paused scene draws on demand under
+///   either, unless its temporal anti-aliasing is on (`Coordinator.draws`).
 /// - `pixelScale` — drawable pixels per point (`nil` = the screen's): a soft scene at 2× on a 3× phone
 ///   draws 44 % of the pixels, the compositor scales it up.
 /// - `preferredFPS` — how many times a second the view draws and wakes `scene`'s tick loop;
 ///   `nil` = today's 60 draws and a tick every display frame. Changes live, nothing is recreated.
+///   Filament hears it with the screen's refresh rate (`RenderRate.filamentPace`): its dynamic
+///   resolution aims at the view's real frame time.
 /// - `renderOverrides` — the host's render knobs, handed to `scene` (`TrideKitScene.setRenderOverrides`)
 ///   whenever the view's value changes; `nil` from the start leaves the scene's own knobs alone.
 /// - `scene` hears the view's size at every layout, touches or not (the camera the view draws
@@ -21,6 +24,10 @@
 /// - One view loads one scene: another scene needs a new view identity (`.id(…)`).
 /// - `.onDemand` suits scenes without temporal effects (no TAA): a paused or off-screen scene then
 ///   costs no GPU at all. A frame Filament skips keeps `needsRender` up — the next display frame retries.
+/// - By the view's distance from the screen (`ScreenDistance`), whatever the policy:
+///   only a view showing on screen draws; one within a screen of it keeps its swap chain and renderer,
+///   one further (or out of its window) gives them back and its layer keeps the last frame; a memory
+///   warning takes them from near views too and shrinks far views' layers. The scene keeps ticking.
 /// - The view is opaque unless the scene's environment frame is transparent: then the
 ///   layer lets what lies under the view show where nothing is drawn (the bridge's swap chain is
 ///   `CONFIG_TRANSPARENT`, the frame premultiplied), set once the scene is attached in `onLoaded`.
@@ -122,9 +129,22 @@ private let logger = Logger(subsystem: "studio.tride.kit", category: "FilamentMe
         var handedRenderOverrides: TrideRenderOverrides?? = .none
         /// Knobs without a scene were reported (once per view).
         var knobsWithoutSceneReported = false
+        /// Frames the view draws a second (`preferredFramesPerSecond`), for the pace Filament hears.
+        var drawRate = 60
+        /// The pace last handed to the bridge (`RenderRate.filamentPace`); `nil` = none yet.
+        private var handedPace: (refreshRate: Double, interval: Int)?
         /// Display frames the view was asked to draw (instrumentation: the rate tests count them).
         private(set) var drawCallbacks = 0
+        /// Where the view stood from the screen at its last display frame.
+        private(set) var screenDistance: ScreenDistance = .onScreen
+        /// The layer was shrunk to 1 × 1 on a memory warning while far (its last frame went with it).
+        private(set) var layerShrunk = false
+        /// The bridge drew at least one frame (a view that comes near before it was ever on screen
+        /// draws one, so it slides in with a picture).
+        private var drewOnce = false
+        weak var view: MTKView?
         private var foregroundObserver: NSObjectProtocol?
+        private var memoryObserver: NSObjectProtocol?
 
         override init() {
             super.init()
@@ -134,22 +154,118 @@ private let logger = Logger(subsystem: "studio.tride.kit", category: "FilamentMe
             ) { [weak self] _ in
                 self?.bridge?.setNeedsRender()
             }
+            memoryObserver = NotificationCenter.default.addObserver(
+                forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.memoryWarning() }
+            }
         }
 
         deinit {
             if let foregroundObserver { NotificationCenter.default.removeObserver(foregroundObserver) }
+            if let memoryObserver { NotificationCenter.default.removeObserver(memoryObserver) }
         }
 
         public func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+            // A shrunk layer's 1 × 1 is no size of the view: the scene keeps its frame and camera.
+            if layerShrunk { return }
             bridge?.resize(size)
         }
 
         public func draw(in view: MTKView) {
             drawCallbacks += 1
             guard let bridge else { return }
-            if renderPolicy == .continuous || bridge.needsRender {
-                bridge.render()
+            let distance = Self.distance(of: view)
+            screenDistance = distance
+            switch distance {
+            case .onScreen:
+                unshrink(view)
+                handPace(view, bridge)
+                if Self.draws(renderPolicy, scene: (view as? PointerMTKView)?.scene, bridge) {
+                    if bridge.render() { drewOnce = true }
+                }
+            case .near:
+                // Near draws nothing and keeps everything; a page that never showed a frame (or lost
+                // it to a shrink) draws one, so it slides in with a picture.
+                if layerShrunk || !drewOnce {
+                    unshrink(view)
+                    handPace(view, bridge)
+                    if bridge.render() { drewOnce = true }
+                }
+            case .far:
+                if bridge.hasSurface { bridge.releaseSurface() }
             }
+        }
+
+        /// A view on screen draws what changed (`needsRender`); `.continuous` also every display frame
+        /// while its scene plays, or while temporal anti-aliasing makes still frames differ. A paused
+        /// scene without it would draw the same picture again: it draws on demand. A view without a
+        /// scene (a host driving the bridge) keeps every frame.
+        @MainActor
+        static func draws(_ policy: RenderPolicy, scene: TrideKitScene?, _ bridge: FilamentBridge) -> Bool {
+            if bridge.needsRender { return true }
+            guard policy == .continuous else { return false }
+            guard let scene, !scene.isPlaying else { return true }
+            return bridge.temporalAntiAliasing
+        }
+
+        /// The draw rate and the screen's refresh rate reach Filament when either changes (a rate
+        /// change, the view moving to another screen).
+        @MainActor
+        private func handPace(_ view: MTKView, _ bridge: FilamentBridge) {
+            guard let screen = view.window?.windowScene?.screen else { return }
+            let pace = RenderRate.filamentPace(
+                drawRate: drawRate, screenMaximum: screen.maximumFramesPerSecond, phoneHeldAt60: Self.phoneHeldAt60)
+            if let handedPace, handedPace == pace { return }
+            handedPace = pace
+            bridge.setFrameRate(displayRefreshRate: pace.refreshRate, frameInterval: pace.interval)
+        }
+
+        /// An iPhone app draws at most 60 a second unless its Info.plist opts out.
+        @MainActor private static let phoneHeldAt60: Bool = {
+            UIDevice.current.userInterfaceIdiom == .phone
+                && (Bundle.main.object(forInfoDictionaryKey: "CADisableMinimumFrameDurationOnPhone") as? Bool) != true
+        }()
+
+        /// A view out of its window draws nothing: its swap chain and renderer go, the scene stays.
+        @MainActor
+        func leftWindow() {
+            screenDistance = .far
+            if let bridge, bridge.hasSurface { bridge.releaseSurface() }
+        }
+
+        /// Am. C on a memory warning: near views give their swap chain and renderer back, far ones
+        /// also shrink their layer (its three drawables).
+        @MainActor
+        func memoryWarning() {
+            guard let bridge else { return }
+            switch screenDistance {
+            case .onScreen:
+                return
+            case .near:
+                if bridge.hasSurface { bridge.releaseSurface() }
+            case .far:
+                if bridge.hasSurface { bridge.releaseSurface() }
+                if let view, !layerShrunk {
+                    layerShrunk = true
+                    view.drawableSize = CGSize(width: 1, height: 1)
+                }
+            }
+        }
+
+        @MainActor
+        private func unshrink(_ view: MTKView) {
+            guard layerShrunk else { return }
+            layerShrunk = false
+            let scale = view.contentScaleFactor
+            view.drawableSize = CGSize(width: max(1, view.bounds.width * scale), height: max(1, view.bounds.height * scale))
+        }
+
+        /// The view's frame in its window against the window's bounds (the screen it shows on).
+        @MainActor
+        private static func distance(of view: MTKView) -> ScreenDistance {
+            guard let window = view.window else { return .far }
+            return ScreenDistance.of(frame: view.convert(view.bounds, to: nil), screen: window.bounds)
         }
     }
 
@@ -165,6 +281,7 @@ private let logger = Logger(subsystem: "studio.tride.kit", category: "FilamentMe
         view.scene = scene
         context.coordinator.renderPolicy = renderPolicy
         view.delegate = context.coordinator
+        context.coordinator.view = view
         applyRenderRate(to: view, context.coordinator)
         handRenderOverrides(context.coordinator)
         view.framebufferOnly = false
@@ -237,6 +354,7 @@ private let logger = Logger(subsystem: "studio.tride.kit", category: "FilamentMe
         // 60 is the draw rate the view always had.
         let fps = rate.fps ?? 60
         if view.preferredFramesPerSecond != fps { view.preferredFramesPerSecond = fps }
+        coordinator.drawRate = fps
         scene?.setWakeRate(rate.fps)
     }
 
@@ -296,6 +414,11 @@ final class PointerMTKView: MTKView {
     override func layoutSubviews() {
         super.layoutSubviews()
         reportSize()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil { (delegate as? FilamentMetalView.Coordinator)?.leftWindow() }
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {

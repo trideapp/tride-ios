@@ -1,4 +1,4 @@
-# TrideKit for iOS — Tride 0.18.0
+# TrideKit for iOS — Tride 0.19.0
 
 Plays Tride scenes (`.trd`) in an iOS app: the Tride runtime, the Filament renderer and a SwiftUI view on
 top of them. A scene is built in Tride Editor ([tride-editor](https://github.com/trideapp/tride-editor))
@@ -22,7 +22,7 @@ what changed — `CHANGELOG.md`.
 ## In your app
 
 1. File → Add Package Dependencies… → `https://github.com/trideapp/tride-ios` → Dependency Rule
-   "Up to Next Major Version" from 0.18.0.
+   "Up to Next Major Version" from 0.19.0.
 2. Add the **TrideKit** product to your app target (it also exposes the runtime's types — `TrideValue`
    and others; a separate **TrideCore** is only for a target that needs no rendering).
 3. In the target's Build Settings: Excluded Architectures → "+" for Any iOS Simulator SDK → `x86_64`
@@ -34,6 +34,10 @@ what changed — `CHANGELOG.md`.
    iPhone; without it, the first run after an install compiles them on the phone (seconds of black screen
    and stutter). The first build takes about 20 s per scene, later builds skip what is already built. A
    `.trd` the app downloads at run time is compiled on the phone, as before.
+   Scenes in your own Swift package instead of the app target: add the plug-in to that package target
+   (`plugins: [.plugin(name: "TrideMaterials", package: "tride-ios")]`, the `.trd` files in its
+   `resources`) and load them with `TrideKitScene.load(data, bundle: .module)` — the libraries land in
+   the package's bundle, and only a scene given that bundle finds them.
 5. Add a `.trd` to the app and show it:
 
 ```swift

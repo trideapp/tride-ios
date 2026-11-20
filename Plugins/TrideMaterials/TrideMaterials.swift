@@ -2,14 +2,16 @@
 /// `.trd` scenes into Metal libraries on the developer's Mac, so an iPhone's first run loads them
 /// instead of compiling Metal source.
 ///
-/// Public API: apply the plugin to the app target that bundles the `.trd` files (Xcode: Build Phases →
-/// Run Build Tool Plug-ins → TrideMaterials; SwiftPM: `plugins: [.plugin(name: "TrideMaterials",
-/// package: "TrideKit")]`).
+/// Public API: apply the plugin to the target that bundles the `.trd` files — the app target (Xcode:
+/// Build Phases → Run Build Tool Plug-ins → TrideMaterials) or a Swift package target holding them as
+/// resources (`plugins: [.plugin(name: "TrideMaterials", package: "tride-ios")]`; the scene is then
+/// loaded with `TrideKitScene(trdBytes:bundle: .module)`).
 ///
 /// Non-obvious constraints:
-///   - Output = side files `tride-metal-<sha256>.filamat` in the bundle, keyed by the sha256 of the
-///     package bytes as the `.trd` holds them; the `.trd` itself is not touched. TrideKit looks the key
-///     up on a device; the simulator keeps the package's Metal source (it cannot load iphoneos libraries).
+///   - Output = side files `tride-metal-<sha256>.filamat` at the root of that target's bundle
+///     (`Bundle.main`, or the package target's `Bundle.module`), keyed by the sha256 of the package
+///     bytes as the `.trd` holds them; the `.trd` itself is not touched. TrideKit looks the key up on a
+///     device; the simulator keeps the package's Metal source (it cannot load iphoneos libraries).
 ///   - A prebuild command runs on every build: packages whose key is already built are skipped, keys no
 ///     scene uses any more are removed.
 ///   - The compile hook is the one Tride builds its own materials with (fixed source name, iOS
@@ -21,9 +23,24 @@ import PackagePlugin
 struct TrideMaterials: BuildToolPlugin {
     func createBuildCommands(context: PluginContext, target: Target) throws -> [Command] {
         guard let module = target.sourceModule else { return [] }
-        let scenes = module.sourceFiles.filter { $0.path.extension == "trd" }.map(\.path)
+        let scenes = Self.scenes(in: module.sourceFiles.map(\.path))
         return try Self.commands(
             scenes: scenes, work: context.pluginWorkDirectory, matedit: context.tool(named: "matedit").path)
+    }
+
+    /// The `.trd` files among a target's files: a copied resource folder (`.copy("Scenes")`, an Xcode
+    /// folder reference) is one entry, so it is walked for the scenes inside.
+    static func scenes(in files: [Path]) -> [Path] {
+        files.flatMap { file -> [Path] in
+            if file.extension == "trd" { return [file] }
+            var folder: ObjCBool = false
+            let files = FileManager.default
+            guard files.fileExists(atPath: file.string, isDirectory: &folder), folder.boolValue,
+                  let walk = files.enumerator(at: URL(fileURLWithPath: file.string), includingPropertiesForKeys: nil)
+            else { return [] }
+            return walk.compactMap { $0 as? URL }.filter { $0.pathExtension == "trd" }
+                .map(\.path).sorted().map { Path($0) }
+        }
     }
 
     /// TrideKit's minimum iOS (`Package.swift` platforms): a library built for a newer iOS than the app
@@ -100,7 +117,7 @@ import XcodeProjectPlugin
 
 extension TrideMaterials: XcodeBuildToolPlugin {
     func createBuildCommands(context: XcodePluginContext, target: XcodeTarget) throws -> [Command] {
-        let scenes = target.inputFiles.filter { $0.path.extension == "trd" }.map(\.path)
+        let scenes = Self.scenes(in: target.inputFiles.map(\.path))
         return try Self.commands(
             scenes: scenes, work: context.pluginWorkDirectory, matedit: context.tool(named: "matedit").path)
     }

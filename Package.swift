@@ -34,28 +34,28 @@ let package = Package(
         // The Tride runtime (Rust), built for iOS, the iOS simulator and macOS.
         .binaryTarget(
             name: "trideFFI",
-            url: "https://github.com/trideapp/tride-ios/releases/download/v0.18.0/TrideCoreFFI.xcframework.zip",
-            checksum: "a43cda5ccc1cca4eddf73be22c1ea141ebda741f7f79532a54baabd615435e06"
+            url: "https://github.com/trideapp/tride-ios/releases/download/v0.19.0/TrideCoreFFI.xcframework.zip",
+            checksum: "800df422894d8af401b1e1b338c13b4a3bc6811d522478567142a16902e6beb1"
         ),
         // Google Filament (Apache-2.0), built from Google's source of the pinned release, its
         // libraries merged into one.
         .binaryTarget(
             name: "Filament",
-            url: "https://github.com/trideapp/tride-ios/releases/download/v0.18.0/Filament.xcframework.zip",
-            checksum: "01f477b5e48cd5ad95af5a26b17124001331c5f5d89ab1052f85b9d666edc08e"
+            url: "https://github.com/trideapp/tride-ios/releases/download/v0.19.0/Filament.xcframework.zip",
+            checksum: "c0a7bbf726ff336bd2750e18893f4d52a1b1ca9e6f77fad77dc8bee13854040d"
         ),
         // The thin ObjC++ bridge to Filament, compiled with `-fno-rtti` like Filament itself.
         .binaryTarget(
             name: "TrideKitFilamentBridge",
-            url: "https://github.com/trideapp/tride-ios/releases/download/v0.18.0/TrideKitFilamentBridge.xcframework.zip",
-            checksum: "74a2a47950cd3e762d30867aca20c3639167674062aaefb06a4ac69faea8c888"
+            url: "https://github.com/trideapp/tride-ios/releases/download/v0.19.0/TrideKitFilamentBridge.xcframework.zip",
+            checksum: "1423abc0ffa54cbe8e5eb2cb40e0b0bf1422e3839cab271e4624002086769d70"
         ),
         // Filament's `matedit` (Google's official release of the same version, Apache-2.0) for the
         // TrideMaterials plugin.
         .binaryTarget(
             name: "matedit",
-            url: "https://github.com/trideapp/tride-ios/releases/download/v0.18.0/matedit.artifactbundle.zip",
-            checksum: "279433844b6a243d31228daeed67d8fff82aa65500cb1fa19ed49b9881ad47b9"
+            url: "https://github.com/trideapp/tride-ios/releases/download/v0.19.0/matedit.artifactbundle.zip",
+            checksum: "46e8e02d4d18057539f7047ed92e24c494deda91b07442eeb75992febcb83e38"
         ),
         // Precompiles the materials of the app's `.trd` scenes into Metal libraries at the app's build.
         .plugin(name: "TrideMaterials", capability: .buildTool(), dependencies: ["matedit"]),
