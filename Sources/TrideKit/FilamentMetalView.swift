@@ -44,7 +44,6 @@ import os
 import TrideCore
 import TrideKitFilamentBridge
 
-private let logger = Logger(subsystem: "studio.tride.kit", category: "FilamentMetalView")
 
 /// SwiftUI view that renders a Tride scene with Filament (`FilamentBridge`) on an `MTKView`, and
 /// owns the bridge's load / render / dispose lifecycle. iOS 17+.
@@ -274,7 +273,7 @@ private let logger = Logger(subsystem: "studio.tride.kit", category: "FilamentMe
     public func makeUIView(context: Context) -> MTKView {
         let device = MTLCreateSystemDefaultDevice()
         if device == nil {
-            logger.fault("No Metal device available — Filament cannot render")
+            TrideLog.error("FilamentMetalView", "No Metal device available — Filament cannot render")
         }
         let view = PointerMTKView(frame: .zero, device: device)
         view.handlesTouches = handlesTouches
@@ -318,7 +317,7 @@ private let logger = Logger(subsystem: "studio.tride.kit", category: "FilamentMe
             view.isOpaque = !transparent
             view.backgroundColor = transparent ? .clear : nil
         } catch {
-            logger.error("scene load failed: \(error.localizedDescription, privacy: .public)")
+            TrideLog.error("FilamentMetalView", "scene load failed: \(error.localizedDescription)")
             onLoadError?(error)
         }
     }
@@ -348,7 +347,7 @@ private let logger = Logger(subsystem: "studio.tride.kit", category: "FilamentMe
             if let scene {
                 scene.note(TrideKitDiagnostic(kind: .runtime, subject: "preferredFPS", message: message))
             } else {
-                logger.warning("\(message, privacy: .public)")
+                TrideLog.warning("FilamentMetalView", "\(message)")
             }
         }
         // 60 is the draw rate the view always had.
@@ -368,7 +367,7 @@ private let logger = Logger(subsystem: "studio.tride.kit", category: "FilamentMe
             scene.setRenderOverrides(renderOverrides)
         } else if !coordinator.knobsWithoutSceneReported {
             coordinator.knobsWithoutSceneReported = true
-            logger.warning("renderOverrides need the view's scene: without one the knobs are ignored")
+            TrideLog.warning("FilamentMetalView", "renderOverrides need the view's scene: without one the knobs are ignored")
         }
     }
 

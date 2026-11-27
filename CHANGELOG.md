@@ -1,6 +1,5 @@
 # Changelog
 
-## v0.19.1 — 2026-11-24
+## v0.20.0 — 2026-11-27
 
-- TrideKit added by URL links again. In 0.19.0 the prebuilt Filament bridge was packaged without the shared engine, so an app that used TrideKit failed to link with undefined SharedEngine symbols.
-- An object whose compiled material package is missing from the scene file is drawn in its fallback look again. In 0.19.0 it could be left out as fully transparent, judged by the package it did not have.
+- TrideKit is quiet by default: `TrideKitLog.level` (`off`, `error`, `warning` by default, `info`, `debug`) sets how much it writes to the system log, `TrideKitLog.handler` takes the lines instead, and the launch argument `-TrideKitLogLevel debug` raises the level without changing code. A playing scene writes no line at any level (the generator line every frame is gone). The runtime's notices are written once, in the `studio.tride.kit` subsystem, and reach `subscribeDiagnostics` with code `core.notice`.

@@ -85,8 +85,6 @@ import simd
 #if canImport(TrideKitFilamentBridge)
 import TrideKitFilamentBridge
 
-private let logger = Logger(subsystem: "studio.tride.kit", category: "TrideKitScene")
-private let evalLogger = Logger(subsystem: "studio.tride.kit", category: "TrideEval")
 /// Signpost intervals for Instruments (`tick`, `dispatch`): free unless a trace records them.
 private let signposts = OSSignposter(subsystem: "studio.tride.kit", category: "Performance")
 
@@ -248,6 +246,9 @@ public final class TrideKitScene {
     /// Problems already reported — each `(kind, subject, message)` once per scene.
     @ObservationIgnored
     private var reportedDiagnostics: Set<String> = []
+    /// How many of the process's core notices (`CoreNotices`) this scene has handed to its diagnostics.
+    @ObservationIgnored
+    private var coreNoticeCursor = 0
     @ObservationIgnored
     private var nextSubscriptionId: UInt64 = 1
 
@@ -350,9 +351,13 @@ public final class TrideKitScene {
         let bytes: Int
     }
 
-    /// The runtime reads the archive once — TrideKit has no zip reader of its own.
+    /// The runtime reads the archive once — TrideKit has no zip reader of its own. The core's notices
+    /// are taken before (the first take tells the runtime to leave the log to TrideKit) and after the
+    /// load (its own notices).
     nonisolated private static func parse(_ trdBytes: Data) throws -> Parsed {
-        Parsed(scene: try TrideScene.load(trdBytes: trdBytes), bytes: trdBytes.count)
+        CoreNotices.pull()
+        defer { CoreNotices.pull() }
+        return Parsed(scene: try TrideScene.load(trdBytes: trdBytes), bytes: trdBytes.count)
     }
 
     private init(parsed: Parsed, bundle: Bundle?) throws {
@@ -367,8 +372,8 @@ public final class TrideKitScene {
         dispatcher.hostImages = hostImages
         _ = try trideScene.subscribeEvents(listener: signals)
         _ = try trideScene.subscribeLayerStateChanges(listener: signals)
-        logger.notice(
-            "loaded TrideScene from \(parsed.bytes) bytes"
+        CoreNotices.open(self)
+        TrideLog.info("TrideKitScene", "loaded TrideScene from \(parsed.bytes) bytes"
         )
     }
 
@@ -807,7 +812,10 @@ public final class TrideKitScene {
     }
 
     /// Receive the problems the scene runs into (`TrideKitDiagnostic`) — on the main actor, after the
-    /// tick that met them, or right after the call that failed. The log gets them too.
+    /// tick that met them, or right after the call that failed. The log gets them too, once, at
+    /// `warning` (`TrideKitLog`). The core's notices (`.runtime`, code `core.notice`) come here
+    /// whatever the log's level: a handler subscribed after the scene handed some out gets those at
+    /// once, the rest with the next tick.
     @discardableResult
     public func subscribeDiagnostics(
         _ handler: @escaping @MainActor (TrideKitDiagnostic) -> Void
@@ -815,6 +823,9 @@ public final class TrideKitScene {
         TrideKitThreadRule.requireMain()
         let token = makeSubscription()
         diagnosticHandlers.append((token.id, handler))
+        for message in CoreNotices.since(0).notices.prefix(coreNoticeCursor) {
+            handler(CoreNotices.diagnostic(message))
+        }
         return token
     }
 
@@ -849,7 +860,7 @@ public final class TrideKitScene {
         driver.start()
         tickDriver = driver
         isPlaying = true
-        logger.debug("play()")
+        TrideLog.debug("TrideKitScene", "play()")
     }
 
     /// The view's render rate reaches the tick loop, at once when playing: the core is woken
@@ -880,7 +891,7 @@ public final class TrideKitScene {
         isPlaying = false
         // No next tick is coming: a trunk the last one deferred is shown now.
         if let bridge, dispatcher.flushDeferredTrunks(into: bridge) { bridge.setNeedsRender() }
-        logger.debug("pause()")
+        TrideLog.debug("TrideKitScene", "pause()")
     }
 
     /// Return the scene to how it loaded — the initial states, every binding at its declared default,
@@ -934,8 +945,7 @@ public final class TrideKitScene {
         }
         releaseUnshownPictures()
         deliverSignals()
-        logger.notice(
-            "advance: ticks=\(result.ticks, privacy: .public) mutations=\(result.tick.mutations.count, privacy: .public)"
+        TrideLog.debug("TrideKitScene", "advance: ticks=\(result.ticks) mutations=\(result.tick.mutations.count)"
         )
         guard let step = result.stoppedStep else { return .completed(ticks: Int(result.ticks)) }
         return .stopped(step: Int(step), reason: result.stoppedReason ?? "stopped", ticks: Int(result.ticks))
@@ -962,8 +972,7 @@ public final class TrideKitScene {
             note(TrideKitDiagnostic(kind: .load, subject: frame.skyMapSource?.name ?? "environment", message: "the shown map is missing — black where it shows"))
         }
         bridge.applyEnvironment(FilamentBridgeEnvironmentValues(frame), lightKtx: lightKtx, skyKtx: skyKtx)
-        logger.notice(
-            "environment applied: light \(frame.light.kind, privacy: .public), sky map \(skyKtx != nil), transparent \(frame.transparent)"
+        TrideLog.debug("TrideKitScene", "environment applied: light \(frame.light.kind), sky map \(skyKtx != nil), transparent \(frame.transparent)"
         )
     }
 
@@ -1044,13 +1053,12 @@ public final class TrideKitScene {
                 bridge.restoreInitialRenderSettings()
                 bridgeTookRenderSettings = false
             }
-            logger.notice("renderSettings: not authored — Filament defaults")
+            TrideLog.debug("TrideKitScene", "renderSettings: not authored — Filament defaults")
             return
         }
         bridge.applyRenderSettings(RenderSettingsDictionary.make(settings))
         bridgeTookRenderSettings = true
-        logger.notice(
-            "renderSettings applied (knobs \(self.renderOverrides == nil ? "none" : "set", privacy: .public)): aa=\(RenderSettingsDictionary.antiAliasing(settings.antiAliasing), privacy: .public) toneMapping=\(RenderSettingsDictionary.toneMapping(settings.toneMapping.operator), privacy: .public) exposure=\(settings.toneMapping.exposure) msaa=\(settings.msaa.enabled)/\(settings.msaa.sampleCount) shadows=\(settings.shadowingEnabled) dof=\(settings.depthOfField.enabled) bloom=\(settings.bloom.enabled) ssao=\(settings.ssao.enabled) ssr=\(settings.screenSpaceReflections.enabled)"
+        TrideLog.debug("TrideKitScene", "renderSettings applied (knobs \(self.renderOverrides == nil ? "none" : "set")): aa=\(RenderSettingsDictionary.antiAliasing(settings.antiAliasing)) toneMapping=\(RenderSettingsDictionary.toneMapping(settings.toneMapping.operator)) exposure=\(settings.toneMapping.exposure) msaa=\(settings.msaa.enabled)/\(settings.msaa.sampleCount) shadows=\(settings.shadowingEnabled) dof=\(settings.depthOfField.enabled) bloom=\(settings.bloom.enabled) ssao=\(settings.ssao.enabled) ssr=\(settings.screenSpaceReflections.enabled)"
         )
     }
 
@@ -1063,7 +1071,7 @@ public final class TrideKitScene {
     private func applyCurrentState(complete: Bool = false) {
         tickAndDispatch(dtMs: 0, complete: complete)
         if bridge != nil {
-            logger.debug("applyCurrentState: pushed initial state to Filament")
+            TrideLog.debug("TrideKitScene", "applyCurrentState: pushed initial state to Filament")
         }
     }
 
@@ -1234,17 +1242,29 @@ public final class TrideKitScene {
 
     /// Queue a problem for `subscribeDiagnostics` and log it — each `(kind, subject, message)` once per
     /// scene: a binding that fails every step is reported once, not sixty times a second.
-    func note(_ diagnostic: TrideKitDiagnostic) {
+    /// The core's notices are in the log already (`CoreNotices.pull`): `logged` keeps them out of it.
+    func note(_ diagnostic: TrideKitDiagnostic, logged: Bool = true) {
         guard reportedDiagnostics.insert(diagnostic.description).inserted else { return }
-        evalLogger.error("\(diagnostic.description, privacy: .public)")
+        if logged { TrideLog.warning("Diagnostics", diagnostic.description) }
         pendingDiagnostics.append(diagnostic)
     }
 
+    /// Hand the pending problems to the handlers, the core's new notices first taken and queued — after
+    /// each tick and failed call, outside any runtime call.
     func deliverDiagnostics() {
+        CoreNotices.pull()
+        let core = CoreNotices.since(coreNoticeCursor)
+        coreNoticeCursor = core.next
+        for message in core.notices { note(CoreNotices.diagnostic(message), logged: false) }
         let ready = pendingDiagnostics
         pendingDiagnostics.removeAll()
+        // The handlers as they are now: one subscribed by a handler got the notices so far already
+        // (`subscribeDiagnostics`), so it must not get this batch's again.
+        let handlers = diagnosticHandlers
         for diagnostic in ready {
-            for entry in diagnosticHandlers { entry.handler(diagnostic) }
+            for entry in handlers where diagnosticHandlers.contains(where: { $0.id == entry.id }) {
+                entry.handler(diagnostic)
+            }
         }
     }
 

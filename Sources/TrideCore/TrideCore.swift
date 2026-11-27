@@ -14809,6 +14809,19 @@ public func tagsCorpusObserve(fixtureJson: String) -> String {
 })
 }
 /**
+ * The core's degrade notices (`warn_once!`, each once per process) raised since the last call, in
+ * the order raised. A bridge calls it after each tick and load, outside any scene call, and writes
+ * them to its own log and diagnostics; from the first call on, `tride-ffi` writes no notice to the
+ * platform log itself. A notice raised before the first call is in the first answer
+ * too (and was already in the platform log).
+ */
+public func takeCoreNotices() -> [String] {
+    return try!  FfiConverterSequenceString.lift(try! rustCall() {
+    uniffi_tride_ffi_fn_func_take_core_notices($0
+    )
+})
+}
+/**
  * Cross-runtime parity probe of texts, used only by the corpus tests: replay one fixture of
  * `tools/fixtures/core-parity/text-corpus.json` with its font files (`fonts`, one per
  * `fixture.fonts` entry, same order) and return its observations as a JSON array (each text's
@@ -14910,6 +14923,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tride_ffi_checksum_func_tags_corpus_observe() != 55602) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_tride_ffi_checksum_func_take_core_notices() != 50196) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tride_ffi_checksum_func_text_corpus_observe() != 1738) {

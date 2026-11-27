@@ -32,7 +32,6 @@ import os
 import TrideCore
 #endif
 
-private let logger = Logger(subsystem: "studio.tride.kit", category: "Audio")
 
 /// A track the app controls and the scene hears.
 @available(iOS 17.0, macCatalyst 17.0, *)
@@ -338,7 +337,7 @@ public final class TrideKitAudioTrack {
             try engine.start()
             node.play()
         } catch {
-            logger.error("audio \(self.input, privacy: .public): the engine did not start again: \(error.localizedDescription, privacy: .public)")
+            TrideLog.error("Audio", "audio \(self.input): the engine did not start again: \(error.localizedDescription)")
         }
     }
 }

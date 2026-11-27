@@ -21,7 +21,6 @@ import Foundation
 import QuartzCore
 import os
 
-private let logger = Logger(subsystem: "studio.tride.kit", category: "TickDriver")
 
 /// The host's render rate as the views take it: `nil` keeps the default; a value of 0
 /// or less is refused (the default stays, the view warns once). A rate above the screen's is the
@@ -179,14 +178,14 @@ final class TickDriver {
         if let fps = clock.pacer.fps { link.preferredFrameRateRange = Self.range(fps) }
         link.add(to: .main, forMode: .common)
         displayLink = link
-        logger.debug("CADisplayLink started")
+        TrideLog.debug("TickDriver", "CADisplayLink started")
     }
 
     func stop() {
         displayLink?.invalidate()
         displayLink = nil
         clock.reset()
-        logger.debug("CADisplayLink stopped")
+        TrideLog.debug("TickDriver", "CADisplayLink stopped")
     }
 
     /// Wake at most `fps` times a second from the next display frame (`nil`: every frame). The step
@@ -246,11 +245,11 @@ final class TickDriver {
     }
 
     func start() {
-        logger.debug("TickDriver start ignored on macOS host tests")
+        TrideLog.debug("TickDriver", "TickDriver start ignored on macOS host tests")
     }
 
     func stop() {
-        logger.debug("TickDriver stop ignored on macOS host tests")
+        TrideLog.debug("TickDriver", "TickDriver stop ignored on macOS host tests")
     }
 }
 

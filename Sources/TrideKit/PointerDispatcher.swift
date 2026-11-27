@@ -6,7 +6,7 @@
 /// ## Non-obvious constraints
 /// - MainActor-only with the Filament bridge. A whole rotation value is the canonical 4-component
 ///   quaternion `[qx, qy, qz, qw]` (read verbatim into `simd_quatf`); a 3-component Euler XYZ value
-///   (radians) from older manifests is still accepted, with a warn-once notice in OSLog.
+///   (radians) from older manifests is still accepted, with a warning once in the log (`TrideLog`).
 ///   A node's rotation arrives whole, as the core composed it: no node axis is
 ///   composed here. Euler XYZ → quaternion (a 3-component value) is the core's (`eulerToQuat`).
 /// - A light / camera is a node: its Light component sits on the place of the node that holds it
@@ -92,7 +92,6 @@ import TrideCore
 #if canImport(TrideKitFilamentBridge)
 import TrideKitFilamentBridge
 
-private let logger = Logger(subsystem: "studio.tride.kit", category: "PointerDispatcher")
 
 /// Signpost events for Instruments (`trunk upload`): free unless a trace records them.
 private let signposts = OSSignposter(subsystem: "studio.tride.kit", category: "Performance")
@@ -369,11 +368,18 @@ final class PointerDispatcher {
     /// Where problems go besides the log: `TrideKitScene` hands them to the host after the tick.
     var report: (TrideKitDiagnostic) -> Void = { _ in }
 
+    /// A problem for the scene's diagnostics; the scene writes it to the log once (`note`).
     private func problem(
         _ kind: TrideKitDiagnostic.Kind, _ subject: String, _ message: String, code: String? = nil
     ) {
-        logger.error("\(kind.rawValue, privacy: .public) \(subject, privacy: .public): \(message, privacy: .public)")
         report(TrideKitDiagnostic(kind: kind, subject: subject, message: message, code: code))
+    }
+
+    /// A node property the tick moved but whose value the core does not give: one problem per
+    /// pointer (the scene reports each once), never a log line per tick.
+    private func noValue(node index: Int, _ property: String) {
+        let pointer = (nodeReadPointer[index] ?? "/nodes/\(index)") + property
+        problem(.pointer, pointer, "the core gives no value for it — the node keeps its last pose")
     }
 
     /// `record`: the scene the view built from the core's record — its places address nodes,
@@ -427,8 +433,7 @@ final class PointerDispatcher {
             )
         }
         if let authoredRender { renderBaseFogColor = authoredRender.fogColor }
-        logger.notice(
-            "bound dispatcher: nodes=\(self.nodeIdToGltfIndex.count) lights=\(record.lightPlace.count) cameras=\(record.cameraPlace.count) activeCamera=\(self.scene.activeCamera() ?? "-", privacy: .public)"
+        TrideLog.debug("PointerDispatcher", "bound dispatcher: nodes=\(self.nodeIdToGltfIndex.count) lights=\(record.lightPlace.count) cameras=\(record.cameraPlace.count) activeCamera=\(self.scene.activeCamera() ?? "-")"
         )
     }
 
@@ -625,7 +630,7 @@ final class PointerDispatcher {
         // of the scene is refused by it.
         guard let engineVersion = bridge.referenceMaterialPackage.flatMap({ materialPackageInfo(bytes: $0) })?.version
         else {
-            logger.error("node materials: the bridge carries no built-in package to check against — none loaded")
+            TrideLog.warning("PointerDispatcher", "node materials: the bridge carries no built-in package to check against — none loaded")
             return
         }
         var precompiled = 0
@@ -646,8 +651,7 @@ final class PointerDispatcher {
                 guard let info = materialPackageInfo(bytes: package), info.version == engineVersion,
                       info.backends.contains("metal")
                 else {
-                    logger.error(
-                        "node material '\(slug, privacy: .public)' (\(family, privacy: .public)): package version \(String(describing: materialPackageInfo(bytes: package)?.version), privacy: .public) for engine \(engineVersion, privacy: .public), or without Metal")
+                    TrideLog.warning("PointerDispatcher", "node material '\(slug)' (\(family)): package version \(String(describing: materialPackageInfo(bytes: package)?.version)) for engine \(engineVersion), or without Metal")
                     refused(slug)
                     continue
                 }
@@ -687,8 +691,7 @@ final class PointerDispatcher {
                 }
             }
         }
-        logger.notice(
-            "node materials: \(self.materialGraphFamilies.count) of \(slugs.count) loaded (\(precompiled) package(s) precompiled)")
+        TrideLog.debug("PointerDispatcher", "node materials: \(self.materialGraphFamilies.count) of \(slugs.count) loaded (\(precompiled) package(s) precompiled)")
     }
 
     /// The core's uniforms of `slug` on `family` at the scene's current values that moved since the
@@ -742,7 +745,7 @@ final class PointerDispatcher {
             uploadedTrunkEpoch[desc.id] = desc.kind == "cloner" ? 0 : desc.epoch
         }
         if !generators.isEmpty {
-            logger.notice("materialized \(generators.count) generator mesh(es)")
+            TrideLog.debug("PointerDispatcher", "materialized \(generators.count) generator mesh(es)")
         }
     }
 
@@ -760,13 +763,13 @@ final class PointerDispatcher {
             uploadParametricNode(node, into: bridge)
         }
         if !parametricNodes.isEmpty {
-            logger.notice("materialized \(self.parametricNodes.count) parametric node(s)")
+            TrideLog.debug("PointerDispatcher", "materialized \(self.parametricNodes.count) parametric node(s)")
         }
         // The nodes the core bent at load (a parametric one drew bent above).
         let bent = scene.listDeformedNodes()
         for uid in bent { refreshDeformed(node: uid, into: bridge) }
         if !bent.isEmpty {
-            logger.notice("materialized \(bent.count) bent node(s)")
+            TrideLog.debug("PointerDispatcher", "materialized \(bent.count) bent node(s)")
         }
     }
 
@@ -1187,7 +1190,7 @@ final class PointerDispatcher {
                 // The batch wears its slug's node material only through a look (`materialParams`).
                 let pullsRows = params != nil
                     && moduleMaterialSlug[part.uid].map(instanceRowSlugs.contains) == true
-                let placed = bridge.syncModuleInstances(
+                _ = bridge.syncModuleInstances(
                     id,
                     symbol: binding.symbol + part.suffix,
                     meshUid: part.uid,
@@ -1196,8 +1199,6 @@ final class PointerDispatcher {
                     parentGltfIndex: generatorHostIndex[id].map { NSNumber(value: $0) },
                     materialParams: params.map { moduleLookDictionary(datablock: part.uid, params: $0) }
                 )
-                logger.debug(
-                    "generator '\(id, privacy: .public)' module '\(binding.symbol + part.suffix, privacy: .public)': \(placed)/\(transforms.count / 64) instances")
             }
         }
     }
@@ -1257,9 +1258,8 @@ final class PointerDispatcher {
         for (id, look) in generatorPulseLook where look.material == slug {
             generatorPulseLook[id] = TridePulseLook(material: slug, materialParams: params)
         }
-        let touched = bridge.updatePaletteMaterial(
+        _ = bridge.updatePaletteMaterial(
             slug, params: Self.materialParamsDictionary(params, slug: slug))
-        logger.debug("palette '\(slug, privacy: .public)': \(touched) instance(s) recoloured")
     }
 
     /// Look fields of glTF glass (transmission, IOR, volume, dispersion) the built-in look this kit
@@ -1373,12 +1373,10 @@ final class PointerDispatcher {
 
     /// Pull the core buffers for `id` and upload them (create or update in place).
     private func uploadGeneratedMesh(id: String, into bridge: FilamentBridge) {
-        let t0 = DispatchTime.now().uptimeNanoseconds
         guard let geometry = coreGeometry(id) else {
             problem(.load, id, "generator announced but has no geometry (its evaluation failed)")
             return
         }
-        let t1 = DispatchTime.now().uptimeNanoseconds
         var dict = Self.geometryDictionary(
             from: geometry,
             parentGltfIndex: generatorHostIndex[id],
@@ -1390,15 +1388,9 @@ final class PointerDispatcher {
         )
         // The streams the preparation queue packed for this geometry: the bridge only uploads them.
         if let packed = pulls?.packed[id] { dict["packed"] = packed }
-        let t2 = DispatchTime.now().uptimeNanoseconds
         if !bridge.upsertGeneratedMesh(id, geometry: dict) {
             problem(.load, id, "the view rejected the generated mesh (epoch \(geometry.epoch))")
         }
-        let t3 = DispatchTime.now().uptimeNanoseconds
-        // Perf signal: FFI lift / dictionary copy / Filament upload per re-evaluation.
-        logger.debug(
-            "generated mesh '\(id, privacy: .public)' verts=\(geometry.positions.count / 12) ffi=\(Double(t1 - t0) / 1e6, format: .fixed(precision: 2))ms dict=\(Double(t2 - t1) / 1e6, format: .fixed(precision: 2))ms upload=\(Double(t3 - t2) / 1e6, format: .fixed(precision: 2))ms"
-        )
         syncModuleInstances(id: id, into: bridge)
     }
 
@@ -1641,7 +1633,7 @@ final class PointerDispatcher {
                 dirtyRotations.insert(i)
                 if !nodeRotationPartWarned {
                     nodeRotationPartWarned = true
-                    logger.warning("rotation: '\(mutation.pointer, privacy: .public)' is a part of a node's rotation — the core sends it whole; the core's quaternion is used")
+                    TrideLog.warning("PointerDispatcher", "rotation: '\(mutation.pointer)' is a part of a node's rotation — the core sends it whole; the core's quaternion is used")
                 }
             case .nodeMorphWeight(let ni, let wi):
                 if let s = Self.extractScalar(from: mutation.typedValue) {
@@ -1819,21 +1811,21 @@ final class PointerDispatcher {
         // Prefer the mutation's typed value, fall back to the readProperty FFI.
         for i in dirtyRotations.subtracting(multiDirty) {
             guard let q = rotationValues[i] ?? readRotationQuaternion(forNodeIndex: i) else {
-                logger.debug("rotation: node \(i) no value — skip")
+                noValue(node: i, "/rotation")
                 continue
             }
             bridge.setNodeRotation(atIndex: Int(i), quaternion: simd_float4(q.imag.x, q.imag.y, q.imag.z, q.real))
         }
         for i in dirtyScales.subtracting(multiDirty) {
             guard let s = scaleValues[i] ?? readNodeVec3(i, "/scale") else {
-                logger.debug("scale: node \(i) no value — skip")
+                noValue(node: i, "/scale")
                 continue
             }
             bridge.setNodeScale(atIndex: Int(i), x: s.x, y: s.y, z: s.z)
         }
         for i in dirtyTranslations.subtracting(multiDirty) {
             guard let t = translationValues[i] ?? readNodeVec3(i, "/translation") else {
-                logger.debug("translation: node \(i) no value — skip")
+                noValue(node: i, "/translation")
                 continue
             }
             bridge.setNodeTranslation(atIndex: Int(i), x: t.x, y: t.y, z: t.z)
@@ -2425,7 +2417,6 @@ final class PointerDispatcher {
             let nodeId = String(remainder[remainder.startIndex..<slashIdx])
             let rest = String(remainder[slashIdx...]) // includes leading "/"
             guard let gltfIndex = nodeIdToGltfIndex[nodeId] else {
-                logger.debug("node '\(nodeId, privacy: .public)' not in nodeMetadata — skipping")
                 return pointer
             }
             return "/nodes/\(gltfIndex)\(rest)"
@@ -2433,7 +2424,6 @@ final class PointerDispatcher {
         // Pointer is just "/node/{uid}" with no property suffix.
         let nodeId = String(remainder)
         guard let gltfIndex = nodeIdToGltfIndex[nodeId] else {
-            logger.debug("node '\(nodeId, privacy: .public)' not in nodeMetadata — skipping")
             return pointer
         }
         return "/nodes/\(gltfIndex)"
@@ -2459,7 +2449,7 @@ final class PointerDispatcher {
     /// - **3 components** → Euler XYZ radians from older manifests
     ///   (manifest schema v3). Emits a warn-once notice on first
     ///   use per session.
-    /// - **Any other length** → error log, returns `nil` (caller skips
+    /// - **Any other length** → a warning once, returns `nil` (caller skips
     ///   the rotation update for this tick).
     static func synthesiseQuaternion(from array: [Float], nodeIndex: Int? = nil) -> simd_quatf? {
         switch array.count {
@@ -2469,22 +2459,21 @@ final class PointerDispatcher {
             warnOnceLegacyEulerRotation(nodeIndex: nodeIndex)
             return eulerXYZQuaternion(SIMD3(array[0], array[1], array[2]))
         default:
-            logger.error("rotation array length \(array.count) unsupported")
+            TrideLog.warningOnce("PointerDispatcher", "rotation array length \(array.count) unsupported")
             return nil
         }
     }
 
     /// Notice for a 3-component Euler rotation value. Fires once per session
     /// on the first such read; subsequent reads stay quiet so noisy v3
-    /// manifests don't flood OSLog.
+    /// manifests do not flood the log.
     private static func warnOnceLegacyEulerRotation(nodeIndex: Int?) {
         guard !legacyEulerRotationWarned else { return }
         legacyEulerRotationWarned = true
         let nodeRef = nodeIndex.map { "/nodes/\($0)" } ?? "<unknown node>"
-        logger.warning(
-            """
+        TrideLog.warning("PointerDispatcher", """
             3-component Euler XYZ rotation read at \
-            \(nodeRef, privacy: .public)/rotation; this fallback is kept \
+            \(nodeRef)/rotation; this fallback is kept \
             for older manifests only. Re-export the \
             scene under manifest v4+ to emit canonical 4-component \
             quaternions and silence this notice.
@@ -2500,7 +2489,7 @@ final class PointerDispatcher {
         // INVARIANT: "xyz" and three angles are always the core's; an empty answer is a core this
         // view was not built against — said, and the identity drawn.
         guard q.count == 4 else {
-            logger.error("eulerToQuat refused the xyz order — drawn unrotated")
+            TrideLog.warningOnce("PointerDispatcher", "eulerToQuat refused the xyz order — drawn unrotated")
             return simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
         }
         return simd_quatf(ix: Float(q[0]), iy: Float(q[1]), iz: Float(q[2]), r: Float(q[3]))
